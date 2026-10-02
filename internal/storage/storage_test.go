@@ -8,7 +8,7 @@ import (
 )
 
 func TestStoreLifecycle(t *testing.T) {
-	store := New()
+	store := NewMemoryStore()
 
 	if _, err := store.Get("user:123:preferences"); !errors.Is(err, ErrKeyNotFound) {
 		t.Fatalf("Get missing key error = %v, want %v", err, ErrKeyNotFound)
@@ -41,7 +41,7 @@ func TestStoreLifecycle(t *testing.T) {
 }
 
 func TestStoreOwnsValues(t *testing.T) {
-	store := New()
+	store := NewMemoryStore()
 	original := []byte("value")
 	if err := store.Put("key", original); err != nil {
 		t.Fatal(err)
@@ -64,7 +64,7 @@ func TestStoreOwnsValues(t *testing.T) {
 }
 
 func TestStoreRejectsEmptyKey(t *testing.T) {
-	store := New()
+	store := NewMemoryStore()
 
 	if err := store.Put("", []byte("value")); !errors.Is(err, ErrEmptyKey) {
 		t.Fatalf("Put empty key error = %v, want %v", err, ErrEmptyKey)
@@ -78,7 +78,7 @@ func TestStoreRejectsEmptyKey(t *testing.T) {
 }
 
 func TestStoreConcurrentAccess(t *testing.T) {
-	store := New()
+	store := NewMemoryStore()
 	const workers = 32
 
 	var wg sync.WaitGroup

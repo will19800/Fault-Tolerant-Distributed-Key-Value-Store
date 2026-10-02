@@ -12,19 +12,19 @@ var (
 	ErrKeyNotFound = errors.New("key not found")
 )
 
-// Store is a concurrent in-memory key-value store.
-type Store struct {
+// MemoryStore is a concurrent in-memory key-value store.
+type MemoryStore struct {
 	mu   sync.RWMutex
 	data map[string][]byte
 }
 
-// New returns an empty Store.
-func New() *Store {
-	return &Store{data: make(map[string][]byte)}
+// NewMemoryStore returns an empty MemoryStore.
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{data: make(map[string][]byte)}
 }
 
 // Put creates key or replaces its current value.
-func (s *Store) Put(key string, value []byte) error {
+func (s *MemoryStore) Put(key string, value []byte) error {
 	if key == "" {
 		return ErrEmptyKey
 	}
@@ -37,7 +37,7 @@ func (s *Store) Put(key string, value []byte) error {
 }
 
 // Get returns a copy of the current value for key.
-func (s *Store) Get(key string) ([]byte, error) {
+func (s *MemoryStore) Get(key string) ([]byte, error) {
 	if key == "" {
 		return nil, ErrEmptyKey
 	}
@@ -53,7 +53,7 @@ func (s *Store) Get(key string) ([]byte, error) {
 }
 
 // Delete removes key. Deleting a missing key succeeds without changing state.
-func (s *Store) Delete(key string) error {
+func (s *MemoryStore) Delete(key string) error {
 	if key == "" {
 		return ErrEmptyKey
 	}

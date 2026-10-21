@@ -1,2 +1,2 @@
-// Package config loads and validates node configuration.
+// Package config parses and validates process configuration.
 package config

@@ -36,3 +36,22 @@ make test-race
 make vet
 make check
 ```
+
+## Run the single-node server
+
+Start the server with its default address, `127.0.0.1:8080`:
+
+```sh
+go run ./cmd/kvserver
+```
+
+Use the command-line client from another terminal:
+
+```sh
+go run ./cmd/kvctl put user:123:preferences '{"theme":"dark"}'
+go run ./cmd/kvctl get user:123:preferences
+go run ./cmd/kvctl delete user:123:preferences
+go run ./cmd/kvctl health
+```
+
+Pass `-server http://host:port` to use another server. Run either command with `-help` to see its available flags.

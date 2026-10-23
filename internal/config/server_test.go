@@ -17,6 +17,9 @@ func TestDefaultServer(t *testing.T) {
 	if cfg.Address != config.DefaultAddress {
 		t.Fatalf("Address = %q, want %q", cfg.Address, config.DefaultAddress)
 	}
+	if cfg.DataDirectory != config.DefaultDataDirectory {
+		t.Fatalf("DataDirectory = %q, want %q", cfg.DataDirectory, config.DefaultDataDirectory)
+	}
 	if cfg.MaxValueBytes != api.DefaultMaxValueBytes {
 		t.Fatalf("MaxValueBytes = %d, want %d", cfg.MaxValueBytes, api.DefaultMaxValueBytes)
 	}
@@ -31,6 +34,7 @@ func TestDefaultServer(t *testing.T) {
 func TestParseServer(t *testing.T) {
 	cfg, err := config.ParseServer([]string{
 		"-addr", "localhost:9090",
+		"-data-dir", "/tmp/kv-data",
 		"-max-value-bytes", "2048",
 		"-shutdown-timeout", "750ms",
 	}, io.Discard)
@@ -40,6 +44,9 @@ func TestParseServer(t *testing.T) {
 
 	if cfg.Address != "localhost:9090" {
 		t.Fatalf("Address = %q, want localhost:9090", cfg.Address)
+	}
+	if cfg.DataDirectory != "/tmp/kv-data" {
+		t.Fatalf("DataDirectory = %q, want /tmp/kv-data", cfg.DataDirectory)
 	}
 	if cfg.MaxValueBytes != 2048 {
 		t.Fatalf("MaxValueBytes = %d, want 2048", cfg.MaxValueBytes)
@@ -87,6 +94,11 @@ func TestServerValidation(t *testing.T) {
 			wantError: "port must be between 1 and 65535",
 		},
 		{
+			name:      "empty data directory",
+			configure: func(cfg *config.Server) { cfg.DataDirectory = "" },
+			wantError: "data directory must not be empty",
+		},
+		{
 			name:      "zero value limit",
 			configure: func(cfg *config.Server) { cfg.MaxValueBytes = 0 },
 			wantError: "maximum value size must be positive",
@@ -95,6 +107,11 @@ func TestServerValidation(t *testing.T) {
 			name:      "zero shutdown timeout",
 			configure: func(cfg *config.Server) { cfg.ShutdownTimeout = 0 },
 			wantError: "shutdown timeout must be positive",
+		},
+		{
+			name:      "value limit exceeds WAL limit",
+			configure: func(cfg *config.Server) { cfg.MaxValueBytes = 64<<20 + 1 },
+			wantError: "maximum value size must not exceed WAL limit",
 		},
 	}
 

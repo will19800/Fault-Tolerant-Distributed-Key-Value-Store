@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -9,16 +10,19 @@ import (
 	"time"
 
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/api"
+	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/wal"
 )
 
 const (
 	DefaultAddress         = "127.0.0.1:8080"
+	DefaultDataDirectory   = "data"
 	DefaultShutdownTimeout = 5 * time.Second
 )
 
 // Server contains configuration for a single-node key-value server.
 type Server struct {
 	Address         string
+	DataDirectory   string
 	MaxValueBytes   int64
 	ShutdownTimeout time.Duration
 }
@@ -27,6 +31,7 @@ type Server struct {
 func DefaultServer() Server {
 	return Server{
 		Address:         DefaultAddress,
+		DataDirectory:   DefaultDataDirectory,
 		MaxValueBytes:   api.DefaultMaxValueBytes,
 		ShutdownTimeout: DefaultShutdownTimeout,
 	}
@@ -43,6 +48,7 @@ func ParseServer(args []string, output io.Writer) (Server, error) {
 	flags := flag.NewFlagSet("kvserver", flag.ContinueOnError)
 	flags.SetOutput(output)
 	flags.StringVar(&cfg.Address, "addr", cfg.Address, "HTTP listen address in host:port form")
+	flags.StringVar(&cfg.DataDirectory, "data-dir", cfg.DataDirectory, "directory for durable server data")
 	flags.Int64Var(&cfg.MaxValueBytes, "max-value-bytes", cfg.MaxValueBytes, "maximum PUT request body size")
 	flags.DurationVar(&cfg.ShutdownTimeout, "shutdown-timeout", cfg.ShutdownTimeout, "graceful shutdown timeout")
 
@@ -63,8 +69,14 @@ func (c Server) Validate() error {
 	if err := validateAddress(c.Address); err != nil {
 		return err
 	}
+	if c.DataDirectory == "" {
+		return errors.New("data directory must not be empty")
+	}
 	if c.MaxValueBytes <= 0 {
 		return fmt.Errorf("maximum value size must be positive: %d", c.MaxValueBytes)
+	}
+	if c.MaxValueBytes > wal.MaxValueBytes {
+		return fmt.Errorf("maximum value size must not exceed WAL limit %d: %d", wal.MaxValueBytes, c.MaxValueBytes)
 	}
 	if c.ShutdownTimeout <= 0 {
 		return fmt.Errorf("shutdown timeout must be positive: %s", c.ShutdownTimeout)

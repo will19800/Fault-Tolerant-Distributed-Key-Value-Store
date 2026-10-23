@@ -13,6 +13,7 @@ cmd/
 internal/
   api/               Client-facing request handling
   config/            Node and cluster configuration
+  database/          Durable single-node database composition
   raft/              Consensus state and algorithms
   snapshot/          State snapshots and restoration
   storage/           Deterministic key-value state machine
@@ -44,6 +45,9 @@ Start the server with its default address, `127.0.0.1:8080`:
 ```sh
 go run ./cmd/kvserver
 ```
+
+Acknowledged mutations are flushed to `data/store.wal` before success is
+returned. Restarting the server with the same `-data-dir` restores its state.
 
 Use the command-line client from another terminal:
 

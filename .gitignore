@@ -27,6 +27,9 @@ go.work.sum
 # env file
 .env
 
+# Default runtime data directory
+/data/
+
 # Editor/IDE
 # .idea/
 # .vscode/

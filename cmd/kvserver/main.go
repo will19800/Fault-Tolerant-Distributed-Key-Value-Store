@@ -12,12 +12,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/api"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/config"
-	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/storage"
+	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/database"
+	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/wal"
 )
 
 const readHeaderTimeout = 5 * time.Second
@@ -32,7 +34,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, args []string, output io.Writer) error {
+func run(ctx context.Context, args []string, output io.Writer) (runErr error) {
 	cfg, err := config.ParseServer(args, output)
 	if errors.Is(err, flag.ErrHelp) {
 		return nil
@@ -41,7 +43,18 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		return fmt.Errorf("parse configuration: %w", err)
 	}
 
-	store := storage.NewMemoryStore()
+	if err := os.MkdirAll(cfg.DataDirectory, 0o700); err != nil {
+		return fmt.Errorf("create data directory %q: %w", cfg.DataDirectory, err)
+	}
+	store, recovery, err := database.Open(filepath.Join(cfg.DataDirectory, "store.wal"), wal.SyncEveryAppend)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer func() {
+		runErr = errors.Join(runErr, store.Close())
+	}()
+	newLogger(output).Info("database recovered", "records", recovery.Records, "truncated_bytes", recovery.TruncatedBytes)
+
 	handler, err := api.NewHandler(store, cfg.MaxValueBytes)
 	if err != nil {
 		return fmt.Errorf("create API handler: %w", err)

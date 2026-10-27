@@ -14,6 +14,8 @@ import (
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/transport"
 )
 
+var _ transport.Handler = (*raft.Node)(nil)
+
 func TestHTTPTransportExchangesRaftRPCs(t *testing.T) {
 	receiver := &recordingHandler{}
 	server := newPeerServer(t, receiver, transport.DefaultMaxRPCBytes)

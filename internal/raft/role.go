@@ -32,5 +32,6 @@ type Status struct {
 	ID       NodeID
 	Role     Role
 	Term     Term
+	VotedFor NodeID
 	LeaderID NodeID
 }

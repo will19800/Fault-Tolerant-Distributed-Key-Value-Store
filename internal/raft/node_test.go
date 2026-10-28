@@ -21,7 +21,7 @@ func TestNodeStartsAsFollower(t *testing.T) {
 }
 
 func TestElectionTimeoutTransitionsToCandidate(t *testing.T) {
-	node, timer := newTestNode(t)
+	node, timer, persistence := newTestNodeWithState(t, raft.HardState{})
 	defer node.Close()
 
 	timer.Fire()
@@ -36,6 +36,18 @@ func TestElectionTimeoutTransitionsToCandidate(t *testing.T) {
 	}
 	if got := timer.ResetCount(); got != 2 {
 		t.Fatalf("timer reset count = %d, want 2", got)
+	}
+	if got := persistence.State(); got != (raft.HardState{CurrentTerm: 2}) {
+		t.Fatalf("persisted hard state = %+v, want term 2", got)
+	}
+}
+
+func TestNodeRecoversHardStateBeforeStarting(t *testing.T) {
+	node, _, _ := newTestNodeWithState(t, raft.HardState{CurrentTerm: 6, VotedFor: "node-2"})
+	defer node.Close()
+	status := nodeStatus(t, node)
+	if status.Term != 6 || status.VotedFor != "node-2" || status.Role != raft.Follower {
+		t.Fatalf("recovered status = %+v", status)
 	}
 }
 
@@ -135,10 +147,12 @@ func TestNodeHonorsCancellationAndStopsTimer(t *testing.T) {
 }
 
 func TestNewNodeValidatesConfig(t *testing.T) {
+	persistence := newMemoryHardStateStore(raft.HardState{})
 	invalid := []raft.NodeConfig{
-		{ElectionTimeout: time.Second},
-		{ID: "node-1"},
-		{ID: "node-1", ElectionTimeout: -time.Second},
+		{ElectionTimeout: time.Second, Persistence: persistence},
+		{ID: "node-1", Persistence: persistence},
+		{ID: "node-1", ElectionTimeout: -time.Second, Persistence: persistence},
+		{ID: "node-1", ElectionTimeout: time.Second},
 	}
 	for _, config := range invalid {
 		if node, err := raft.NewNode(config); err == nil {
@@ -148,18 +162,96 @@ func TestNewNodeValidatesConfig(t *testing.T) {
 	}
 }
 
-func newTestNode(t *testing.T) (*raft.Node, *manualTimer) {
-	t.Helper()
+func TestNodePersistsHigherTermBeforeReply(t *testing.T) {
+	persistence := &blockingHardStateStore{
+		state:   raft.HardState{CurrentTerm: 2, VotedFor: "node-3"},
+		started: make(chan raft.HardState, 1),
+		release: make(chan struct{}),
+	}
 	timer := newManualTimer()
 	node, err := raft.NewNode(raft.NodeConfig{
-		ID:              "node-1",
-		ElectionTimeout: time.Second,
-		Clock:           manualClock{timer: timer},
+		ID: "node-1", ElectionTimeout: time.Second,
+		Clock: manualClock{timer: timer}, Persistence: persistence,
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
 	}
+	defer node.Close()
+
+	type rpcResult struct {
+		response raft.RequestVoteResponse
+		err      error
+	}
+	finished := make(chan rpcResult, 1)
+	go func() {
+		response, err := node.HandleRequestVote(context.Background(), raft.RequestVoteRequest{Term: 4, CandidateID: "node-2"})
+		finished <- rpcResult{response: response, err: err}
+	}()
+
+	if state := <-persistence.started; state != (raft.HardState{CurrentTerm: 4}) {
+		t.Fatalf("Save state = %+v, want term 4 with cleared vote", state)
+	}
+	select {
+	case result := <-finished:
+		t.Fatalf("RPC returned before persistence completed: %+v", result)
+	default:
+	}
+	close(persistence.release)
+	result := <-finished
+	if result.err != nil || result.response.Term != 4 {
+		t.Fatalf("HandleRequestVote = %+v, %v", result.response, result.err)
+	}
+	status := nodeStatus(t, node)
+	if status.Term != 4 || status.VotedFor != "" {
+		t.Fatalf("status after persisted transition = %+v", status)
+	}
+}
+
+func TestNodeStopsOnPersistenceFailure(t *testing.T) {
+	saveFailure := errors.New("disk failure")
+	persistence := newMemoryHardStateStore(raft.HardState{})
+	persistence.saveErr = saveFailure
+	timer := newManualTimer()
+	node, err := raft.NewNode(raft.NodeConfig{
+		ID: "node-1", ElectionTimeout: time.Second,
+		Clock: manualClock{timer: timer}, Persistence: persistence,
+	})
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+
+	_, err = node.HandleAppendEntries(context.Background(), raft.AppendEntriesRequest{Term: 2, LeaderID: "node-2"})
+	if !errors.Is(err, saveFailure) {
+		t.Fatalf("HandleAppendEntries error = %v, want disk failure", err)
+	}
+	if status, err := node.Status(context.Background()); !errors.Is(err, saveFailure) {
+		t.Fatalf("Status after failure = %+v, %v; want disk failure", status, err)
+	}
+	if err := node.Close(); !errors.Is(err, saveFailure) {
+		t.Fatalf("Close error = %v, want disk failure", err)
+	}
+}
+
+func newTestNode(t *testing.T) (*raft.Node, *manualTimer) {
+	t.Helper()
+	node, timer, _ := newTestNodeWithState(t, raft.HardState{})
 	return node, timer
+}
+
+func newTestNodeWithState(t *testing.T, state raft.HardState) (*raft.Node, *manualTimer, *memoryHardStateStore) {
+	t.Helper()
+	timer := newManualTimer()
+	persistence := newMemoryHardStateStore(state)
+	node, err := raft.NewNode(raft.NodeConfig{
+		ID:              "node-1",
+		ElectionTimeout: time.Second,
+		Clock:           manualClock{timer: timer},
+		Persistence:     persistence,
+	})
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+	return node, timer, persistence
 }
 
 func nodeStatus(t *testing.T, node *raft.Node) raft.Status {
@@ -222,4 +314,54 @@ func (t *manualTimer) Stopped() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.stopped
+}
+
+type memoryHardStateStore struct {
+	mu      sync.Mutex
+	state   raft.HardState
+	loadErr error
+	saveErr error
+}
+
+func newMemoryHardStateStore(state raft.HardState) *memoryHardStateStore {
+	return &memoryHardStateStore{state: state}
+}
+
+func (s *memoryHardStateStore) Load() (raft.HardState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state, s.loadErr
+}
+
+func (s *memoryHardStateStore) Save(state raft.HardState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	s.state = state
+	return nil
+}
+
+func (s *memoryHardStateStore) State() raft.HardState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state
+}
+
+type blockingHardStateStore struct {
+	state   raft.HardState
+	started chan raft.HardState
+	release chan struct{}
+}
+
+func (s *blockingHardStateStore) Load() (raft.HardState, error) {
+	return s.state, nil
+}
+
+func (s *blockingHardStateStore) Save(state raft.HardState) error {
+	s.started <- state
+	<-s.release
+	s.state = state
+	return nil
 }

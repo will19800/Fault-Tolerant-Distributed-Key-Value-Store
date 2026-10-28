@@ -37,8 +37,8 @@ func TestElectionTimeoutTransitionsToCandidate(t *testing.T) {
 	if got := timer.ResetCount(); got != 2 {
 		t.Fatalf("timer reset count = %d, want 2", got)
 	}
-	if got := persistence.State(); got != (raft.HardState{CurrentTerm: 2}) {
-		t.Fatalf("persisted hard state = %+v, want term 2", got)
+	if got := persistence.State(); got != (raft.HardState{CurrentTerm: 2, VotedFor: "node-1"}) {
+		t.Fatalf("persisted hard state = %+v, want term 2 and self-vote", got)
 	}
 }
 
@@ -72,11 +72,11 @@ func TestHigherTermRPCTransitionsNodeToFollower(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleRequestVote: %v", err)
 	}
-	if voteResponse.Term != 7 || voteResponse.VoteGranted {
+	if voteResponse.Term != 7 || !voteResponse.VoteGranted {
 		t.Fatalf("vote response = %+v", voteResponse)
 	}
 	status = nodeStatus(t, node)
-	if status.Role != raft.Follower || status.Term != 7 || status.LeaderID != "" {
+	if status.Role != raft.Follower || status.Term != 7 || status.VotedFor != "node-3" || status.LeaderID != "" {
 		t.Fatalf("status after vote request = %+v", status)
 	}
 }
@@ -149,10 +149,11 @@ func TestNodeHonorsCancellationAndStopsTimer(t *testing.T) {
 func TestNewNodeValidatesConfig(t *testing.T) {
 	persistence := newMemoryHardStateStore(raft.HardState{})
 	invalid := []raft.NodeConfig{
-		{ElectionTimeout: time.Second, Persistence: persistence},
-		{ID: "node-1", Persistence: persistence},
-		{ID: "node-1", ElectionTimeout: -time.Second, Persistence: persistence},
-		{ID: "node-1", ElectionTimeout: time.Second},
+		{Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, Persistence: persistence},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: -time.Second, Persistence: persistence},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second},
+		{ID: "node-1", Members: []raft.NodeID{"node-1"}, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence},
 	}
 	for _, config := range invalid {
 		if node, err := raft.NewNode(config); err == nil {
@@ -170,7 +171,7 @@ func TestNodePersistsHigherTermBeforeReply(t *testing.T) {
 	}
 	timer := newManualTimer()
 	node, err := raft.NewNode(raft.NodeConfig{
-		ID: "node-1", ElectionTimeout: time.Second,
+		ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second,
 		Clock: manualClock{timer: timer}, Persistence: persistence,
 	})
 	if err != nil {
@@ -202,7 +203,7 @@ func TestNodePersistsHigherTermBeforeReply(t *testing.T) {
 		t.Fatalf("HandleRequestVote = %+v, %v", result.response, result.err)
 	}
 	status := nodeStatus(t, node)
-	if status.Term != 4 || status.VotedFor != "" {
+	if status.Term != 4 || status.VotedFor != "node-2" {
 		t.Fatalf("status after persisted transition = %+v", status)
 	}
 }
@@ -213,7 +214,7 @@ func TestNodeStopsOnPersistenceFailure(t *testing.T) {
 	persistence.saveErr = saveFailure
 	timer := newManualTimer()
 	node, err := raft.NewNode(raft.NodeConfig{
-		ID: "node-1", ElectionTimeout: time.Second,
+		ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second,
 		Clock: manualClock{timer: timer}, Persistence: persistence,
 	})
 	if err != nil {
@@ -244,6 +245,8 @@ func newTestNodeWithState(t *testing.T, state raft.HardState) (*raft.Node, *manu
 	persistence := newMemoryHardStateStore(state)
 	node, err := raft.NewNode(raft.NodeConfig{
 		ID:              "node-1",
+		Members:         testMembers,
+		Transport:       unavailableTransport{},
 		ElectionTimeout: time.Second,
 		Clock:           manualClock{timer: timer},
 		Persistence:     persistence,
@@ -353,6 +356,18 @@ type blockingHardStateStore struct {
 	state   raft.HardState
 	started chan raft.HardState
 	release chan struct{}
+}
+
+var testMembers = []raft.NodeID{"node-1", "node-2", "node-3"}
+
+type unavailableTransport struct{}
+
+func (unavailableTransport) RequestVote(context.Context, raft.NodeID, raft.RequestVoteRequest) (raft.RequestVoteResponse, error) {
+	return raft.RequestVoteResponse{}, errors.New("peer unavailable")
+}
+
+func (unavailableTransport) AppendEntries(context.Context, raft.NodeID, raft.AppendEntriesRequest) (raft.AppendEntriesResponse, error) {
+	return raft.AppendEntriesResponse{}, errors.New("peer unavailable")
 }
 
 func (s *blockingHardStateStore) Load() (raft.HardState, error) {

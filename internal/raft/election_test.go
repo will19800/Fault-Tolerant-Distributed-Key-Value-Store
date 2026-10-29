@@ -183,6 +183,7 @@ func TestNodeRejectsRecoveredVoteForUnknownMember(t *testing.T) {
 		ElectionTimeout: time.Second,
 		Persistence:     newMemoryHardStateStore(raft.HardState{CurrentTerm: 2, VotedFor: "outsider"}),
 		LogStore:        newMemoryLogStore(nil),
+		StateMachine:    newMemoryStateMachine(),
 	})
 	if !errors.Is(err, raft.ErrUnknownMember) {
 		t.Fatalf("NewNode error = %v, want ErrUnknownMember", err)
@@ -197,7 +198,7 @@ func TestElectionTimeoutsUseInjectedRandomJitter(t *testing.T) {
 		ID: "node-1", Members: testMembers, Transport: unavailableTransport{},
 		ElectionTimeout: 100 * time.Millisecond, MaximumElectionTimeout: 200 * time.Millisecond,
 		HeartbeatInterval: 20 * time.Millisecond, Clock: clock, Random: random, Persistence: persistence,
-		LogStore: newMemoryLogStore(nil),
+		LogStore: newMemoryLogStore(nil), StateMachine: newMemoryStateMachine(),
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
@@ -233,8 +234,9 @@ func newElectionCluster(t *testing.T) *electionCluster {
 			ID: id, Members: testMembers, Transport: cluster.network,
 			ElectionTimeout: time.Second, MaximumElectionTimeout: time.Second,
 			HeartbeatInterval: 100 * time.Millisecond, Clock: clock,
-			Persistence: newMemoryHardStateStore(raft.HardState{}),
-			LogStore:    newMemoryLogStore(nil),
+			Persistence:  newMemoryHardStateStore(raft.HardState{}),
+			LogStore:     newMemoryLogStore(nil),
+			StateMachine: newMemoryStateMachine(),
 		})
 		if err != nil {
 			t.Fatalf("NewNode(%q): %v", id, err)
@@ -275,8 +277,9 @@ func newElectionTestNode(t *testing.T, options electionNodeOptions) (*raft.Node,
 		ID: "node-1", Members: testMembers, Transport: options.transport,
 		ElectionTimeout: time.Second, MaximumElectionTimeout: time.Second,
 		HeartbeatInterval: 100 * time.Millisecond, Clock: clock,
-		Persistence: newMemoryHardStateStore(raft.HardState{}),
-		LogStore:    newMemoryLogStore(entries),
+		Persistence:  newMemoryHardStateStore(raft.HardState{}),
+		LogStore:     newMemoryLogStore(entries),
+		StateMachine: newMemoryStateMachine(),
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)

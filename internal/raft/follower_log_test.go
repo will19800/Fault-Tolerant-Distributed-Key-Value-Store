@@ -183,7 +183,7 @@ func newFollowerNodeWithStores(t *testing.T, hardState raft.HardStateStore, logS
 	node, err := raft.NewNode(raft.NodeConfig{
 		ID: "node-1", Members: testMembers, Transport: unavailableTransport{},
 		ElectionTimeout: time.Second, Clock: manualClock{timer: newManualTimer()},
-		Persistence: hardState, LogStore: logStore,
+		Persistence: hardState, LogStore: logStore, StateMachine: newMemoryStateMachine(),
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)

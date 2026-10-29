@@ -50,6 +50,7 @@ type NodeConfig struct {
 	Random                 RandomSource
 	Persistence            HardStateStore
 	LogStore               LogStore
+	StateMachine           StateMachine
 }
 
 // Node serializes timers, RPCs, and state queries through one event loop.
@@ -123,8 +124,8 @@ func (n *Node) Status(ctx context.Context) (Status, error) {
 	}
 }
 
-// Propose durably appends a command to the leader's local log and starts
-// replication. The returned index is not necessarily committed yet.
+// Propose durably appends a command and waits until it is committed and
+// applied locally. A context error leaves the proposal outcome ambiguous.
 func (n *Node) Propose(ctx context.Context, command []byte) (LogIndex, error) {
 	if len(command) > MaxCommandBytes {
 		return 0, fmt.Errorf("command exceeds %d bytes", MaxCommandBytes)
@@ -238,6 +239,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 	nextIndex := make(map[NodeID]LogIndex, len(peers))
 	matchIndex := make(map[NodeID]LogIndex, len(peers))
 	appendInFlight := make(map[NodeID]bool, len(peers))
+	pendingProposals := make(map[LogIndex][]chan<- proposalResult)
 
 	cancelElection := func() {
 		if electionCancel != nil {
@@ -279,7 +281,18 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 	resetElectionTimer := func() {
 		electionTimer.Reset(nextElectionTimeout(config))
 	}
+	failPendingProposals := func(err error) {
+		for index, replies := range pendingProposals {
+			for _, reply := range replies {
+				reply <- proposalResult{err: err}
+			}
+			delete(pendingProposals, index)
+		}
+	}
 	becomeFollower := func(leader NodeID) {
+		if state.Role == Leader {
+			failPendingProposals(ErrNotLeader)
+		}
 		cancelElection()
 		cancelLeader()
 		votes = nil
@@ -289,6 +302,24 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		clear(matchIndex)
 		clear(appendInFlight)
 		resetElectionTimer()
+	}
+	applyCommitted := func() error {
+		for state.LastApplied < state.CommitIndex {
+			next := state.LastApplied + 1
+			if next > LogIndex(len(logEntries)) {
+				return fmt.Errorf("committed index %d exceeds log length %d", state.CommitIndex, len(logEntries))
+			}
+			entry := logEntries[next-1]
+			if err := config.StateMachine.Apply(slices.Clone(entry.Command)); err != nil {
+				return fmt.Errorf("apply committed entry %d: %w", next, err)
+			}
+			state.LastApplied = next
+			for _, reply := range pendingProposals[next] {
+				reply <- proposalResult{index: next}
+			}
+			delete(pendingProposals, next)
+		}
+		return nil
 	}
 
 	sendVoteRequests := func(ctx context.Context, term Term) {
@@ -427,7 +458,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 				}
 				logEntries = nextLog
 				state.LastLogIndex, state.LastLogTerm = lastLogPosition(logEntries)
-				event.reply <- proposalResult{index: entry.Index}
+				pendingProposals[entry.Index] = append(pendingProposals[entry.Index], event.reply)
 				sendAllReplication(leaderContext, state.Term)
 			case requestVoteEvent:
 				if event.request.Term > state.Term {
@@ -486,6 +517,11 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 						state.CommitIndex = commit
 					}
 				}
+				if err := applyCommitted(); err != nil {
+					applicationErr := fmt.Errorf("apply follower commit through %d: %w", state.CommitIndex, err)
+					event.reply <- appendResult{err: applicationErr}
+					return applicationErr
+				}
 				event.reply <- appendResult{response: response}
 			case voteRPCEvent:
 				if event.err != nil {
@@ -530,6 +566,9 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 					previousCommit := state.CommitIndex
 					state.CommitIndex = committedIndex(logEntries, matchIndex, quorum, state.Term, state.CommitIndex)
 					if state.CommitIndex > previousCommit {
+						if err := applyCommitted(); err != nil {
+							return fmt.Errorf("apply leader commit through %d: %w", state.CommitIndex, err)
+						}
 						sendAllReplication(leaderContext, state.Term)
 					} else if nextIndex[event.peer] <= state.LastLogIndex || event.requestCommit < state.CommitIndex {
 						sendReplication(leaderContext, event.peer, state.Term)
@@ -582,6 +621,9 @@ func normalizeNodeConfig(config *NodeConfig) error {
 	}
 	if config.LogStore == nil {
 		return errors.New("Raft log store must not be nil")
+	}
+	if config.StateMachine == nil {
+		return errors.New("state machine must not be nil")
 	}
 	if config.ElectionTimeout <= 0 {
 		return fmt.Errorf("election timeout must be positive: %s", config.ElectionTimeout)

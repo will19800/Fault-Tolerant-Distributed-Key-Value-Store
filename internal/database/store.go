@@ -110,12 +110,5 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) apply(record wal.Record) error {
-	switch record.Operation {
-	case wal.OperationPut:
-		return s.state.Put(record.Key, record.Value)
-	case wal.OperationDelete:
-		return s.state.Delete(record.Key)
-	default:
-		return fmt.Errorf("unsupported WAL operation %d", record.Operation)
-	}
+	return applyRecord(s.state, record)
 }

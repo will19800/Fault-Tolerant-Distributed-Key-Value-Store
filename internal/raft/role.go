@@ -37,4 +37,5 @@ type Status struct {
 	LastLogIndex LogIndex
 	LastLogTerm  Term
 	CommitIndex  LogIndex
+	LastApplied  LogIndex
 }

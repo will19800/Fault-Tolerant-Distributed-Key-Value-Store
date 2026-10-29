@@ -2,6 +2,7 @@ package raft_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"testing"
@@ -55,8 +56,53 @@ func TestLeaderRepairsDivergentFollowerAndCommitsCurrentTermEntry(t *testing.T) 
 	waitForNodeStatus(t, cluster.nodes["node-2"], func(status raft.Status) bool {
 		return status.CommitIndex == 4
 	})
+	wantApplied := [][]byte{[]byte("one"), []byte("two"), []byte("three"), []byte("current-term")}
+	for _, id := range testMembers {
+		waitForCondition(t, func() bool {
+			return slices.EqualFunc(cluster.machines[id].Commands(), wantApplied, slices.Equal)
+		}, "ordered state-machine application on "+string(id))
+	}
+	before := cluster.machines["node-2"].Commands()
+	response, err := cluster.nodes["node-2"].HandleAppendEntries(context.Background(), raft.AppendEntriesRequest{
+		Term: 3, LeaderID: "node-1", PrevLogIndex: 4, PrevLogTerm: 3, LeaderCommit: 4,
+	})
+	if err != nil || !response.Success {
+		t.Fatalf("duplicate commit heartbeat = %+v, %v", response, err)
+	}
+	if after := cluster.machines["node-2"].Commands(); !slices.EqualFunc(after, before, slices.Equal) {
+		t.Fatalf("duplicate heartbeat reapplied commands: before=%q after=%q", before, after)
+	}
 	if got := cluster.stores["node-1"].Entries()[3].Command; string(got) != "current-term" {
 		t.Fatalf("stored command = %q, want owned proposal bytes", got)
+	}
+}
+
+func TestProposalWaitsForStateMachineApplication(t *testing.T) {
+	blocking := &blockingStateMachine{started: make(chan []byte, 1), release: make(chan struct{})}
+	cluster := newReplicationClusterWithDependencies(t, nil, map[raft.NodeID]raft.StateMachine{"node-1": blocking})
+	defer cluster.Close()
+	cluster.elect(t, "node-1")
+
+	finished := make(chan error, 1)
+	go func() {
+		_, err := cluster.nodes["node-1"].Propose(context.Background(), []byte("apply-before-ack"))
+		finished <- err
+	}()
+	if command := <-blocking.started; string(command) != "apply-before-ack" {
+		t.Fatalf("applying command = %q", command)
+	}
+	select {
+	case err := <-finished:
+		t.Fatalf("proposal returned before Apply completed: %v", err)
+	default:
+	}
+	close(blocking.release)
+	if err := <-finished; err != nil {
+		t.Fatalf("Propose after Apply: %v", err)
+	}
+	status := nodeStatus(t, cluster.nodes["node-1"])
+	if status.CommitIndex != 1 || status.LastApplied != 1 {
+		t.Fatalf("status after application = %+v", status)
 	}
 }
 
@@ -77,8 +123,10 @@ func TestLeaderCommitsWithMajorityButNotMinority(t *testing.T) {
 	})
 
 	cluster.network.Unregister("node-2")
-	if index, err := cluster.nodes["node-1"].Propose(context.Background(), []byte("minority")); err != nil || index != 2 {
-		t.Fatalf("minority Propose = %d, %v", index, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if index, err := cluster.nodes["node-1"].Propose(ctx, []byte("minority")); index != 0 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("minority Propose = %d, %v; want deadline while uncommitted", index, err)
 	}
 	waitForCondition(t, func() bool {
 		return cluster.transport.appendCount("node-2") >= 2 && cluster.transport.appendCount("node-3") >= 2
@@ -120,6 +168,7 @@ type replicationCluster struct {
 	nodes     map[raft.NodeID]*raft.Node
 	timers    map[raft.NodeID]*recordingTimer
 	stores    map[raft.NodeID]*memoryLogStore
+	machines  map[raft.NodeID]*memoryStateMachine
 }
 
 func newReplicationCluster(t *testing.T, logs map[raft.NodeID][]raft.Entry) *replicationCluster {
@@ -132,12 +181,16 @@ func newReplicationCluster(t *testing.T, logs map[raft.NodeID][]raft.Entry) *rep
 }
 
 func newReplicationClusterWithStores(t *testing.T, supplied map[raft.NodeID]*memoryLogStore) *replicationCluster {
+	return newReplicationClusterWithDependencies(t, supplied, nil)
+}
+
+func newReplicationClusterWithDependencies(t *testing.T, supplied map[raft.NodeID]*memoryLogStore, suppliedMachines map[raft.NodeID]raft.StateMachine) *replicationCluster {
 	t.Helper()
 	network := transport.NewMemoryNetwork()
 	cluster := &replicationCluster{
 		network: network, transport: &recordingTransport{network: network},
 		nodes: make(map[raft.NodeID]*raft.Node), timers: make(map[raft.NodeID]*recordingTimer),
-		stores: make(map[raft.NodeID]*memoryLogStore),
+		stores: make(map[raft.NodeID]*memoryLogStore), machines: make(map[raft.NodeID]*memoryStateMachine),
 	}
 	for _, id := range testMembers {
 		store := supplied[id]
@@ -145,11 +198,18 @@ func newReplicationClusterWithStores(t *testing.T, supplied map[raft.NodeID]*mem
 			store = newMemoryLogStore(nil)
 		}
 		clock := newTimerClock()
+		machine := suppliedMachines[id]
+		memoryMachine, ok := machine.(*memoryStateMachine)
+		if machine == nil {
+			memoryMachine = newMemoryStateMachine()
+			machine = memoryMachine
+		}
 		node, err := raft.NewNode(raft.NodeConfig{
 			ID: id, Members: testMembers, Transport: cluster.transport,
 			ElectionTimeout: time.Second, MaximumElectionTimeout: time.Second,
 			HeartbeatInterval: 100 * time.Millisecond, Clock: clock,
 			Persistence: newMemoryHardStateStore(raft.HardState{CurrentTerm: 2}), LogStore: store,
+			StateMachine: machine,
 		})
 		if err != nil {
 			t.Fatalf("NewNode(%q): %v", id, err)
@@ -158,8 +218,22 @@ func newReplicationClusterWithStores(t *testing.T, supplied map[raft.NodeID]*mem
 			t.Fatalf("Register(%q): %v", id, err)
 		}
 		cluster.nodes[id], cluster.timers[id], cluster.stores[id] = node, clock.Timer(0), store
+		if ok || suppliedMachines[id] == nil {
+			cluster.machines[id] = memoryMachine
+		}
 	}
 	return cluster
+}
+
+type blockingStateMachine struct {
+	started chan []byte
+	release chan struct{}
+}
+
+func (s *blockingStateMachine) Apply(command []byte) error {
+	s.started <- append([]byte(nil), command...)
+	<-s.release
+	return nil
 }
 
 func (c *replicationCluster) elect(t *testing.T, id raft.NodeID) {

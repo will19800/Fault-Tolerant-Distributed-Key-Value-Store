@@ -24,7 +24,7 @@ type Store interface {
 	Delete(key string) error
 }
 
-// Handler serves the single-node key-value HTTP API.
+// Handler serves the key-value HTTP API.
 type Handler struct {
 	store         Store
 	maxValueBytes int64

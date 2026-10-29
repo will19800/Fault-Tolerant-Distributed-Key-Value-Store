@@ -148,13 +148,15 @@ func TestNodeHonorsCancellationAndStopsTimer(t *testing.T) {
 
 func TestNewNodeValidatesConfig(t *testing.T) {
 	persistence := newMemoryHardStateStore(raft.HardState{})
+	stateMachine := newMemoryStateMachine()
 	invalid := []raft.NodeConfig{
-		{Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence, LogStore: newMemoryLogStore(nil)},
-		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, Persistence: persistence, LogStore: newMemoryLogStore(nil)},
-		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: -time.Second, Persistence: persistence, LogStore: newMemoryLogStore(nil)},
-		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, LogStore: newMemoryLogStore(nil)},
-		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence},
-		{ID: "node-1", Members: []raft.NodeID{"node-1"}, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence, LogStore: newMemoryLogStore(nil)},
+		{Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence, LogStore: newMemoryLogStore(nil), StateMachine: stateMachine},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, Persistence: persistence, LogStore: newMemoryLogStore(nil), StateMachine: stateMachine},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: -time.Second, Persistence: persistence, LogStore: newMemoryLogStore(nil), StateMachine: stateMachine},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, LogStore: newMemoryLogStore(nil), StateMachine: stateMachine},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence, StateMachine: stateMachine},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence, LogStore: newMemoryLogStore(nil)},
+		{ID: "node-1", Members: []raft.NodeID{"node-1"}, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence, LogStore: newMemoryLogStore(nil), StateMachine: stateMachine},
 	}
 	for _, config := range invalid {
 		if node, err := raft.NewNode(config); err == nil {
@@ -173,7 +175,7 @@ func TestNodePersistsHigherTermBeforeReply(t *testing.T) {
 	timer := newManualTimer()
 	node, err := raft.NewNode(raft.NodeConfig{
 		ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second,
-		Clock: manualClock{timer: timer}, Persistence: persistence, LogStore: newMemoryLogStore(nil),
+		Clock: manualClock{timer: timer}, Persistence: persistence, LogStore: newMemoryLogStore(nil), StateMachine: newMemoryStateMachine(),
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
@@ -216,7 +218,7 @@ func TestNodeStopsOnPersistenceFailure(t *testing.T) {
 	timer := newManualTimer()
 	node, err := raft.NewNode(raft.NodeConfig{
 		ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second,
-		Clock: manualClock{timer: timer}, Persistence: persistence, LogStore: newMemoryLogStore(nil),
+		Clock: manualClock{timer: timer}, Persistence: persistence, LogStore: newMemoryLogStore(nil), StateMachine: newMemoryStateMachine(),
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
@@ -252,6 +254,7 @@ func newTestNodeWithState(t *testing.T, state raft.HardState) (*raft.Node, *manu
 		Clock:           manualClock{timer: timer},
 		Persistence:     persistence,
 		LogStore:        newMemoryLogStore(nil),
+		StateMachine:    newMemoryStateMachine(),
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
@@ -360,6 +363,36 @@ type memoryLogStore struct {
 	loadErr error
 	saveErr error
 	saves   int
+}
+
+type memoryStateMachine struct {
+	mu       sync.Mutex
+	commands [][]byte
+	applyErr error
+}
+
+func newMemoryStateMachine() *memoryStateMachine {
+	return &memoryStateMachine{}
+}
+
+func (s *memoryStateMachine) Apply(command []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.applyErr != nil {
+		return s.applyErr
+	}
+	s.commands = append(s.commands, append([]byte(nil), command...))
+	return nil
+}
+
+func (s *memoryStateMachine) Commands() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	commands := make([][]byte, len(s.commands))
+	for index := range s.commands {
+		commands[index] = append([]byte(nil), s.commands[index]...)
+	}
+	return commands
 }
 
 func newMemoryLogStore(entries []raft.Entry) *memoryLogStore {

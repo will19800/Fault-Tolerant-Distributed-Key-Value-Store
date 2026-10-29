@@ -167,6 +167,7 @@ func TestNodeRejectsRecoveredVoteForUnknownMember(t *testing.T) {
 		ID: "node-1", Members: testMembers, Transport: unavailableTransport{},
 		ElectionTimeout: time.Second,
 		Persistence:     newMemoryHardStateStore(raft.HardState{CurrentTerm: 2, VotedFor: "outsider"}),
+		LogStore:        newMemoryLogStore(nil),
 	})
 	if !errors.Is(err, raft.ErrUnknownMember) {
 		t.Fatalf("NewNode error = %v, want ErrUnknownMember", err)
@@ -181,6 +182,7 @@ func TestElectionTimeoutsUseInjectedRandomJitter(t *testing.T) {
 		ID: "node-1", Members: testMembers, Transport: unavailableTransport{},
 		ElectionTimeout: 100 * time.Millisecond, MaximumElectionTimeout: 200 * time.Millisecond,
 		HeartbeatInterval: 20 * time.Millisecond, Clock: clock, Random: random, Persistence: persistence,
+		LogStore: newMemoryLogStore(nil),
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
@@ -217,6 +219,7 @@ func newElectionCluster(t *testing.T) *electionCluster {
 			ElectionTimeout: time.Second, MaximumElectionTimeout: time.Second,
 			HeartbeatInterval: 100 * time.Millisecond, Clock: clock,
 			Persistence: newMemoryHardStateStore(raft.HardState{}),
+			LogStore:    newMemoryLogStore(nil),
 		})
 		if err != nil {
 			t.Fatalf("NewNode(%q): %v", id, err)
@@ -249,12 +252,16 @@ func newElectionTestNode(t *testing.T, options electionNodeOptions) (*raft.Node,
 		options.transport = unavailableTransport{}
 	}
 	clock := newTimerClock()
+	entries := make([]raft.Entry, options.lastLogIndex)
+	for index := range entries {
+		entries[index] = raft.Entry{Index: raft.LogIndex(index + 1), Term: options.lastLogTerm}
+	}
 	node, err := raft.NewNode(raft.NodeConfig{
 		ID: "node-1", Members: testMembers, Transport: options.transport,
 		ElectionTimeout: time.Second, MaximumElectionTimeout: time.Second,
 		HeartbeatInterval: 100 * time.Millisecond, Clock: clock,
-		Persistence:  newMemoryHardStateStore(raft.HardState{}),
-		LastLogIndex: options.lastLogIndex, LastLogTerm: options.lastLogTerm,
+		Persistence: newMemoryHardStateStore(raft.HardState{}),
+		LogStore:    newMemoryLogStore(entries),
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)

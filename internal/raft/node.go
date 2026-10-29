@@ -47,8 +47,7 @@ type NodeConfig struct {
 	Clock                  Clock
 	Random                 RandomSource
 	Persistence            HardStateStore
-	LastLogIndex           LogIndex
-	LastLogTerm            Term
+	LogStore               LogStore
 }
 
 // Node serializes timers, RPCs, and state queries through one event loop.
@@ -77,6 +76,14 @@ func NewNode(config NodeConfig) (*Node, error) {
 	if hardState.VotedFor != "" && !slices.Contains(config.Members, hardState.VotedFor) {
 		return nil, fmt.Errorf("recovered vote for %q: %w", hardState.VotedFor, ErrUnknownMember)
 	}
+	logEntries, err := config.LogStore.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load Raft log: %w", err)
+	}
+	if err := validateLog(logEntries); err != nil {
+		return nil, fmt.Errorf("validate Raft log: %w", err)
+	}
+	logEntries = cloneEntries(logEntries)
 	electionTimer := config.Clock.NewTimer(nextElectionTimeout(config))
 	if electionTimer == nil {
 		return nil, errors.New("clock returned a nil election timer")
@@ -92,7 +99,7 @@ func NewNode(config NodeConfig) (*Node, error) {
 		node.members[member] = struct{}{}
 	}
 	go func() {
-		node.runErr = node.run(config, electionTimer, hardState)
+		node.runErr = node.run(config, electionTimer, hardState, logEntries)
 		close(node.done)
 	}()
 	return node, nil
@@ -187,7 +194,7 @@ func (n *Node) stoppedError() error {
 	return ErrNodeStopped
 }
 
-func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState) error {
+func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, logEntries []Entry) error {
 	defer electionTimer.Stop()
 
 	state := Status{
@@ -196,6 +203,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState) 
 		Term:     hardState.CurrentTerm,
 		VotedFor: hardState.VotedFor,
 	}
+	state.LastLogIndex, state.LastLogTerm = lastLogPosition(logEntries)
 	peers := peerIDs(config.Members, config.ID)
 	quorum := len(config.Members)/2 + 1
 	var votes map[NodeID]struct{}
@@ -255,9 +263,10 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState) 
 	}
 
 	sendVoteRequests := func(ctx context.Context, term Term) {
+		lastIndex, lastTerm := lastLogPosition(logEntries)
 		request := RequestVoteRequest{
 			Term: term, CandidateID: config.ID,
-			LastLogIndex: config.LastLogIndex, LastLogTerm: config.LastLogTerm,
+			LastLogIndex: lastIndex, LastLogTerm: lastTerm,
 		}
 		for _, peer := range peers {
 			go func(peer NodeID) {
@@ -270,9 +279,10 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState) 
 		}
 	}
 	sendHeartbeats := func(ctx context.Context, term Term) {
+		lastIndex, lastTerm := lastLogPosition(logEntries)
 		request := AppendEntriesRequest{
 			Term: term, LeaderID: config.ID,
-			PrevLogIndex: config.LastLogIndex, PrevLogTerm: config.LastLogTerm,
+			PrevLogIndex: lastIndex, PrevLogTerm: lastTerm,
 		}
 		for _, peer := range peers {
 			go func(peer NodeID) {
@@ -350,7 +360,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState) 
 					becomeFollower("")
 				}
 				grant := false
-				if event.request.Term == state.Term && candidateLogIsFresh(event.request, config.LastLogIndex, config.LastLogTerm) &&
+				if event.request.Term == state.Term && candidateLogIsFresh(event.request, logEntries) &&
 					(state.VotedFor == "" || state.VotedFor == event.request.CandidateID) {
 					if state.VotedFor == "" {
 						next := hardState
@@ -373,10 +383,25 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState) 
 						return persistenceErr
 					}
 				}
-				if event.request.Term >= state.Term {
-					becomeFollower(event.request.LeaderID)
+				if event.request.Term < state.Term {
+					event.reply <- appendResult{response: AppendEntriesResponse{
+						Term: state.Term, ConflictIndex: LogIndex(len(logEntries)) + 1,
+					}}
+					continue
 				}
-				event.reply <- appendResult{response: AppendEntriesResponse{Term: state.Term, ConflictIndex: 1}}
+				becomeFollower(event.request.LeaderID)
+				nextLog, response, changed := reconcileLog(logEntries, event.request)
+				response.Term = state.Term
+				if changed {
+					if err := config.LogStore.Save(nextLog); err != nil {
+						persistenceErr := fmt.Errorf("persist entries through index %d: %w", response.MatchIndex, err)
+						event.reply <- appendResult{err: persistenceErr}
+						return persistenceErr
+					}
+					logEntries = nextLog
+					state.LastLogIndex, state.LastLogTerm = lastLogPosition(logEntries)
+				}
+				event.reply <- appendResult{response: response}
 			case voteRPCEvent:
 				if event.err != nil {
 					continue
@@ -440,6 +465,9 @@ func normalizeNodeConfig(config *NodeConfig) error {
 	if config.Persistence == nil {
 		return errors.New("hard-state persistence must not be nil")
 	}
+	if config.LogStore == nil {
+		return errors.New("Raft log store must not be nil")
+	}
 	if config.ElectionTimeout <= 0 {
 		return fmt.Errorf("election timeout must be positive: %s", config.ElectionTimeout)
 	}
@@ -454,9 +482,6 @@ func normalizeNodeConfig(config *NodeConfig) error {
 	}
 	if config.HeartbeatInterval <= 0 || config.HeartbeatInterval >= config.ElectionTimeout {
 		return errors.New("heartbeat interval must be positive and below the minimum election timeout")
-	}
-	if err := validateLogPosition(config.LastLogIndex, config.LastLogTerm, "local last log"); err != nil {
-		return err
 	}
 	if config.Clock == nil {
 		config.Clock = systemClock{}
@@ -485,13 +510,6 @@ func peerIDs(members []NodeID, localID NodeID) []NodeID {
 		}
 	}
 	return peers
-}
-
-func candidateLogIsFresh(request RequestVoteRequest, localIndex LogIndex, localTerm Term) bool {
-	if request.LastLogTerm != localTerm {
-		return request.LastLogTerm > localTerm
-	}
-	return request.LastLogIndex >= localIndex
 }
 
 type statusEvent struct {

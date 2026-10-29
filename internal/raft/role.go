@@ -29,9 +29,11 @@ func (r Role) String() string {
 
 // Status is an immutable snapshot of a node's event-loop-owned state.
 type Status struct {
-	ID       NodeID
-	Role     Role
-	Term     Term
-	VotedFor NodeID
-	LeaderID NodeID
+	ID           NodeID
+	Role         Role
+	Term         Term
+	VotedFor     NodeID
+	LeaderID     NodeID
+	LastLogIndex LogIndex
+	LastLogTerm  Term
 }

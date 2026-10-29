@@ -60,6 +60,7 @@ func (r AppendEntriesRequest) Validate() error {
 	}
 
 	expectedIndex := r.PrevLogIndex + 1
+	previousTerm := r.PrevLogTerm
 	for position, entry := range r.Entries {
 		if err := entry.Validate(); err != nil {
 			return fmt.Errorf("entry %d: %w", position, err)
@@ -67,7 +68,17 @@ func (r AppendEntriesRequest) Validate() error {
 		if entry.Index != expectedIndex {
 			return fmt.Errorf("entry %d index is %d, want contiguous index %d", position, entry.Index, expectedIndex)
 		}
+		if entry.Term < previousTerm {
+			return fmt.Errorf("entry %d term %d is below preceding term %d", position, entry.Term, previousTerm)
+		}
+		if entry.Term > r.Term {
+			return fmt.Errorf("entry %d term %d exceeds leader term %d", position, entry.Term, r.Term)
+		}
+		if len(entry.Command) > MaxCommandBytes {
+			return fmt.Errorf("entry %d command exceeds %d bytes", position, MaxCommandBytes)
+		}
 		expectedIndex++
+		previousTerm = entry.Term
 	}
 	return nil
 }

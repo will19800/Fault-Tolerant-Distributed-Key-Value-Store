@@ -48,7 +48,7 @@ func TestNodeRecoversTermFromFileAfterRestart(t *testing.T) {
 	firstTimer := newManualTimer()
 	first, err := raft.NewNode(raft.NodeConfig{
 		ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second,
-		Clock: manualClock{timer: firstTimer}, Persistence: store,
+		Clock: manualClock{timer: firstTimer}, Persistence: store, LogStore: newMemoryLogStore(nil),
 	})
 	if err != nil {
 		t.Fatalf("first NewNode: %v", err)
@@ -68,7 +68,7 @@ func TestNodeRecoversTermFromFileAfterRestart(t *testing.T) {
 	secondTimer := newManualTimer()
 	second, err := raft.NewNode(raft.NodeConfig{
 		ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second,
-		Clock: manualClock{timer: secondTimer}, Persistence: reopened,
+		Clock: manualClock{timer: secondTimer}, Persistence: reopened, LogStore: newMemoryLogStore(nil),
 	})
 	if err != nil {
 		t.Fatalf("second NewNode: %v", err)

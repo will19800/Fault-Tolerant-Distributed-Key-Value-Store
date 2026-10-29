@@ -60,7 +60,7 @@ func TestHigherTermRPCTransitionsNodeToFollower(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleAppendEntries: %v", err)
 	}
-	if appendResponse.Term != 5 || appendResponse.Success || appendResponse.ConflictIndex != 1 {
+	if appendResponse.Term != 5 || !appendResponse.Success || appendResponse.MatchIndex != 0 {
 		t.Fatalf("append response = %+v", appendResponse)
 	}
 	status := nodeStatus(t, node)
@@ -149,11 +149,12 @@ func TestNodeHonorsCancellationAndStopsTimer(t *testing.T) {
 func TestNewNodeValidatesConfig(t *testing.T) {
 	persistence := newMemoryHardStateStore(raft.HardState{})
 	invalid := []raft.NodeConfig{
-		{Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence},
-		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, Persistence: persistence},
-		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: -time.Second, Persistence: persistence},
-		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second},
-		{ID: "node-1", Members: []raft.NodeID{"node-1"}, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence},
+		{Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence, LogStore: newMemoryLogStore(nil)},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, Persistence: persistence, LogStore: newMemoryLogStore(nil)},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: -time.Second, Persistence: persistence, LogStore: newMemoryLogStore(nil)},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, LogStore: newMemoryLogStore(nil)},
+		{ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence},
+		{ID: "node-1", Members: []raft.NodeID{"node-1"}, Transport: unavailableTransport{}, ElectionTimeout: time.Second, Persistence: persistence, LogStore: newMemoryLogStore(nil)},
 	}
 	for _, config := range invalid {
 		if node, err := raft.NewNode(config); err == nil {
@@ -172,7 +173,7 @@ func TestNodePersistsHigherTermBeforeReply(t *testing.T) {
 	timer := newManualTimer()
 	node, err := raft.NewNode(raft.NodeConfig{
 		ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second,
-		Clock: manualClock{timer: timer}, Persistence: persistence,
+		Clock: manualClock{timer: timer}, Persistence: persistence, LogStore: newMemoryLogStore(nil),
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
@@ -215,7 +216,7 @@ func TestNodeStopsOnPersistenceFailure(t *testing.T) {
 	timer := newManualTimer()
 	node, err := raft.NewNode(raft.NodeConfig{
 		ID: "node-1", Members: testMembers, Transport: unavailableTransport{}, ElectionTimeout: time.Second,
-		Clock: manualClock{timer: timer}, Persistence: persistence,
+		Clock: manualClock{timer: timer}, Persistence: persistence, LogStore: newMemoryLogStore(nil),
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
@@ -250,6 +251,7 @@ func newTestNodeWithState(t *testing.T, state raft.HardState) (*raft.Node, *manu
 		ElectionTimeout: time.Second,
 		Clock:           manualClock{timer: timer},
 		Persistence:     persistence,
+		LogStore:        newMemoryLogStore(nil),
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
@@ -350,6 +352,56 @@ func (s *memoryHardStateStore) State() raft.HardState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.state
+}
+
+type memoryLogStore struct {
+	mu      sync.Mutex
+	entries []raft.Entry
+	loadErr error
+	saveErr error
+	saves   int
+}
+
+func newMemoryLogStore(entries []raft.Entry) *memoryLogStore {
+	return &memoryLogStore{entries: cloneTestEntries(entries)}
+}
+
+func (s *memoryLogStore) Load() ([]raft.Entry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneTestEntries(s.entries), s.loadErr
+}
+
+func (s *memoryLogStore) Save(entries []raft.Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	s.entries = cloneTestEntries(entries)
+	s.saves++
+	return nil
+}
+
+func (s *memoryLogStore) SaveCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saves
+}
+
+func (s *memoryLogStore) Entries() []raft.Entry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneTestEntries(s.entries)
+}
+
+func cloneTestEntries(entries []raft.Entry) []raft.Entry {
+	cloned := make([]raft.Entry, len(entries))
+	copy(cloned, entries)
+	for index := range cloned {
+		cloned[index].Command = append([]byte(nil), cloned[index].Command...)
+	}
+	return cloned
 }
 
 type blockingHardStateStore struct {

@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
-	"io"
 	"os"
-	"path/filepath"
 	"sync"
 )
 
@@ -95,29 +93,7 @@ func (s *FileHardStateStore) Save(state HardState) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	directory := filepath.Dir(s.path)
-	temporary, err := os.CreateTemp(directory, ".hard-state-*")
-	if err != nil {
-		return fmt.Errorf("create hard-state temporary file: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-
-	if err := writeHardStateFile(temporary, frame); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close hard-state temporary file: %w", err)
-	}
-	if err := os.Rename(temporaryPath, s.path); err != nil {
-		return fmt.Errorf("publish hard state: %w", err)
-	}
-	if err := syncDirectory(directory); err != nil {
-		return fmt.Errorf("sync hard-state directory: %w", err)
-	}
-	return nil
+	return replaceFileAtomically(s.path, ".hard-state-*", frame)
 }
 
 func encodeHardState(state HardState) ([]byte, error) {
@@ -171,29 +147,4 @@ func hardStateChecksum(frame []byte) uint32 {
 	_, _ = checksum.Write(frame[4:16])
 	_, _ = checksum.Write(frame[hardStateHeaderSize:])
 	return checksum.Sum32()
-}
-
-func writeHardStateFile(file *os.File, frame []byte) error {
-	for len(frame) > 0 {
-		written, err := file.Write(frame)
-		if err != nil {
-			return fmt.Errorf("write hard-state temporary file: %w", err)
-		}
-		if written == 0 {
-			return fmt.Errorf("write hard-state temporary file: %w", io.ErrShortWrite)
-		}
-		frame = frame[written:]
-	}
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("sync hard-state temporary file: %w", err)
-	}
-	return nil
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	return errors.Join(directory.Sync(), directory.Close())
 }

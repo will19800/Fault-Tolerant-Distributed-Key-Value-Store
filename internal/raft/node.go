@@ -23,6 +23,8 @@ var (
 	ErrNodeStopped = errors.New("Raft node stopped")
 	// ErrUnknownMember is returned for RPCs from outside fixed membership.
 	ErrUnknownMember = errors.New("unknown Raft member")
+	// ErrNotLeader is returned when a proposal targets a follower or candidate.
+	ErrNotLeader = errors.New("Raft node is not the leader")
 )
 
 // RandomSource supplies election-timeout jitter.
@@ -121,6 +123,27 @@ func (n *Node) Status(ctx context.Context) (Status, error) {
 	}
 }
 
+// Propose durably appends a command to the leader's local log and starts
+// replication. The returned index is not necessarily committed yet.
+func (n *Node) Propose(ctx context.Context, command []byte) (LogIndex, error) {
+	if len(command) > MaxCommandBytes {
+		return 0, fmt.Errorf("command exceeds %d bytes", MaxCommandBytes)
+	}
+	reply := make(chan proposalResult, 1)
+	event := proposalEvent{command: slices.Clone(command), reply: reply}
+	if err := n.submit(ctx, event); err != nil {
+		return 0, err
+	}
+	select {
+	case result := <-reply:
+		return result.index, result.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-n.done:
+		return 0, n.stoppedError()
+	}
+}
+
 // HandleRequestVote serializes a vote request through the event loop.
 func (n *Node) HandleRequestVote(ctx context.Context, request RequestVoteRequest) (RequestVoteResponse, error) {
 	if err := request.Validate(); err != nil {
@@ -212,6 +235,9 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 	var leaderCancel context.CancelFunc
 	var heartbeatTimer Timer
 	var heartbeatC <-chan time.Time
+	nextIndex := make(map[NodeID]LogIndex, len(peers))
+	matchIndex := make(map[NodeID]LogIndex, len(peers))
+	appendInFlight := make(map[NodeID]bool, len(peers))
 
 	cancelElection := func() {
 		if electionCancel != nil {
@@ -259,6 +285,9 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		votes = nil
 		state.Role = Follower
 		state.LeaderID = leader
+		clear(nextIndex)
+		clear(matchIndex)
+		clear(appendInFlight)
 		resetElectionTimer()
 	}
 
@@ -278,20 +307,44 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 			}(peer)
 		}
 	}
-	sendHeartbeats := func(ctx context.Context, term Term) {
-		lastIndex, lastTerm := lastLogPosition(logEntries)
-		request := AppendEntriesRequest{
-			Term: term, LeaderID: config.ID,
-			PrevLogIndex: lastIndex, PrevLogTerm: lastTerm,
+	var sendReplication func(context.Context, NodeID, Term)
+	sendReplication = func(ctx context.Context, peer NodeID, term Term) {
+		if appendInFlight[peer] {
+			return
 		}
+		next := nextIndex[peer]
+		if next == 0 {
+			next = 1
+		}
+		lastIndex, _ := lastLogPosition(logEntries)
+		if next > lastIndex+1 {
+			next = lastIndex + 1
+		}
+		prevIndex := next - 1
+		prevTerm := Term(0)
+		if prevIndex > 0 {
+			prevTerm = logEntries[prevIndex-1].Term
+		}
+		request := AppendEntriesRequest{
+			Term: term, LeaderID: config.ID, PrevLogIndex: prevIndex,
+			PrevLogTerm: prevTerm, Entries: cloneEntries(logEntries[next-1:]),
+			LeaderCommit: state.CommitIndex,
+		}
+		appendInFlight[peer] = true
+		go func() {
+			response, err := config.Transport.AppendEntries(ctx, peer, request)
+			if err == nil {
+				err = response.Validate()
+			}
+			_ = n.submit(ctx, appendRPCEvent{
+				peer: peer, requestTerm: term, requestNext: next,
+				requestCommit: request.LeaderCommit, response: response, err: err,
+			})
+		}()
+	}
+	sendAllReplication := func(ctx context.Context, term Term) {
 		for _, peer := range peers {
-			go func(peer NodeID) {
-				response, err := config.Transport.AppendEntries(ctx, peer, request)
-				if err == nil {
-					err = response.Validate()
-				}
-				_ = n.submit(ctx, appendRPCEvent{response: response, err: err})
-			}(peer)
+			sendReplication(ctx, peer, term)
 		}
 	}
 	becomeLeader := func() error {
@@ -300,6 +353,12 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		state.LeaderID = config.ID
 		electionTimer.Stop()
 		leaderContext, leaderCancel = context.WithCancel(context.Background())
+		lastIndex, _ := lastLogPosition(logEntries)
+		for _, peer := range peers {
+			nextIndex[peer] = lastIndex + 1
+			matchIndex[peer] = 0
+			appendInFlight[peer] = false
+		}
 		if heartbeatTimer == nil {
 			heartbeatTimer = config.Clock.NewTimer(config.HeartbeatInterval)
 			if heartbeatTimer == nil {
@@ -309,7 +368,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 			heartbeatTimer.Reset(config.HeartbeatInterval)
 		}
 		heartbeatC = heartbeatTimer.C()
-		sendHeartbeats(leaderContext, state.Term)
+		sendAllReplication(leaderContext, state.Term)
 		return nil
 	}
 	startElection := func() error {
@@ -344,12 +403,32 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		case <-heartbeatC:
 			if state.Role == Leader {
 				heartbeatTimer.Reset(config.HeartbeatInterval)
-				sendHeartbeats(leaderContext, state.Term)
+				sendAllReplication(leaderContext, state.Term)
 			}
 		case rawEvent := <-n.events:
 			switch event := rawEvent.(type) {
 			case statusEvent:
 				event.reply <- state
+			case proposalEvent:
+				if state.Role != Leader {
+					event.reply <- proposalResult{err: ErrNotLeader}
+					continue
+				}
+				if state.LastLogIndex == ^LogIndex(0) {
+					event.reply <- proposalResult{err: errors.New("Raft log index overflow")}
+					continue
+				}
+				entry := Entry{Index: state.LastLogIndex + 1, Term: state.Term, Command: slices.Clone(event.command)}
+				nextLog := append(cloneEntries(logEntries), entry)
+				if err := config.LogStore.Save(nextLog); err != nil {
+					persistenceErr := fmt.Errorf("persist proposed entry %d: %w", entry.Index, err)
+					event.reply <- proposalResult{err: persistenceErr}
+					return persistenceErr
+				}
+				logEntries = nextLog
+				state.LastLogIndex, state.LastLogTerm = lastLogPosition(logEntries)
+				event.reply <- proposalResult{index: entry.Index}
+				sendAllReplication(leaderContext, state.Term)
 			case requestVoteEvent:
 				if event.request.Term > state.Term {
 					if err := persistTerm(event.request.Term); err != nil {
@@ -401,6 +480,12 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 					logEntries = nextLog
 					state.LastLogIndex, state.LastLogTerm = lastLogPosition(logEntries)
 				}
+				if response.Success && event.request.LeaderCommit > state.CommitIndex {
+					commit := min(event.request.LeaderCommit, response.MatchIndex)
+					if commit > state.CommitIndex {
+						state.CommitIndex = commit
+					}
+				}
 				event.reply <- appendResult{response: response}
 			case voteRPCEvent:
 				if event.err != nil {
@@ -423,11 +508,41 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 					}
 				}
 			case appendRPCEvent:
+				if state.Role != Leader || event.requestTerm != state.Term {
+					continue
+				}
+				appendInFlight[event.peer] = false
 				if event.err == nil && event.response.Term > state.Term {
 					if err := persistTerm(event.response.Term); err != nil {
 						return fmt.Errorf("persist append-response term %d: %w", event.response.Term, err)
 					}
 					becomeFollower("")
+					continue
+				}
+				if event.err != nil {
+					continue
+				}
+				if event.response.Success {
+					if event.response.MatchIndex > matchIndex[event.peer] {
+						matchIndex[event.peer] = event.response.MatchIndex
+						nextIndex[event.peer] = event.response.MatchIndex + 1
+					}
+					previousCommit := state.CommitIndex
+					state.CommitIndex = committedIndex(logEntries, matchIndex, quorum, state.Term, state.CommitIndex)
+					if state.CommitIndex > previousCommit {
+						sendAllReplication(leaderContext, state.Term)
+					} else if nextIndex[event.peer] <= state.LastLogIndex || event.requestCommit < state.CommitIndex {
+						sendReplication(leaderContext, event.peer, state.Term)
+					}
+					continue
+				}
+				if event.requestNext != nextIndex[event.peer] {
+					continue
+				}
+				retryAt := conflictNextIndex(logEntries, event.response)
+				if retryAt < nextIndex[event.peer] {
+					nextIndex[event.peer] = retryAt
+					sendReplication(leaderContext, event.peer, state.Term)
 				}
 			}
 		case <-n.stop:
@@ -516,6 +631,16 @@ type statusEvent struct {
 	reply chan<- Status
 }
 
+type proposalEvent struct {
+	command []byte
+	reply   chan<- proposalResult
+}
+
+type proposalResult struct {
+	index LogIndex
+	err   error
+}
+
 type requestVoteEvent struct {
 	request RequestVoteRequest
 	reply   chan<- voteResult
@@ -544,6 +669,10 @@ type voteRPCEvent struct {
 }
 
 type appendRPCEvent struct {
-	response AppendEntriesResponse
-	err      error
+	peer          NodeID
+	requestTerm   Term
+	requestNext   LogIndex
+	requestCommit LogIndex
+	response      AppendEntriesResponse
+	err           error
 }

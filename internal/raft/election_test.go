@@ -98,14 +98,29 @@ func TestLeaderSendsHeartbeatsAndStepsDownForHigherTerm(t *testing.T) {
 	waitForCondition(t, func() bool { return peerTransport.appendCalls() >= 2 }, "initial heartbeats")
 	heartbeatTimer := clock.Timer(1)
 	before := peerTransport.appendCalls()
-	heartbeatTimer.Fire()
-	waitForCondition(t, func() bool { return peerTransport.appendCalls() >= before+2 }, "periodic heartbeats")
+	deadline := time.Now().Add(2 * time.Second)
+	for peerTransport.appendCalls() < before+2 && time.Now().Before(deadline) {
+		heartbeatTimer.TryFire()
+		runtime.Gosched()
+	}
+	if got := peerTransport.appendCalls(); got < before+2 {
+		t.Fatalf("periodic heartbeat calls = %d, want at least %d", got, before+2)
+	}
 
 	peerTransport.setAppendResponseTerm(3)
-	heartbeatTimer.Fire()
-	status := waitForNodeStatus(t, node, func(status raft.Status) bool {
-		return status.Role == raft.Follower && status.Term == 3
-	})
+	var status raft.Status
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status = nodeStatus(t, node)
+		if status.Role == raft.Follower && status.Term == 3 {
+			break
+		}
+		heartbeatTimer.TryFire()
+		runtime.Gosched()
+	}
+	if status.Role != raft.Follower || status.Term != 3 {
+		t.Fatalf("node did not step down for higher-term append response: %+v", status)
+	}
 	if status.LeaderID != "" || status.VotedFor != "" {
 		t.Fatalf("status after higher-term heartbeat response = %+v", status)
 	}
@@ -322,7 +337,13 @@ func (t *scriptedTransport) AppendEntries(_ context.Context, _ raft.NodeID, requ
 	if t.appendResponseTerm > term {
 		term = t.appendResponseTerm
 	}
-	return raft.AppendEntriesResponse{Term: term, ConflictIndex: 1}, nil
+	if term > request.Term {
+		return raft.AppendEntriesResponse{Term: term, ConflictIndex: 1}, nil
+	}
+	return raft.AppendEntriesResponse{
+		Term: term, Success: true,
+		MatchIndex: request.PrevLogIndex + raft.LogIndex(len(request.Entries)),
+	}, nil
 }
 
 func (t *scriptedTransport) voteCalls() int {
@@ -410,6 +431,13 @@ func (t *recordingTimer) Stop() bool {
 
 func (t *recordingTimer) Fire() {
 	t.channel <- time.Time{}
+}
+
+func (t *recordingTimer) TryFire() {
+	select {
+	case t.channel <- time.Time{}:
+	default:
+	}
 }
 
 func (t *recordingTimer) InitialDuration() time.Duration {

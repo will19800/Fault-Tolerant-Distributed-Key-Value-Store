@@ -30,31 +30,32 @@ func TestLeaderRepairsDivergentFollowerAndCommitsCurrentTermEntry(t *testing.T) 
 	defer cluster.Close()
 
 	cluster.elect(t, "node-1")
+	leaderAfterElection := append(cloneTestEntries(leaderLog), raft.Entry{Index: 4, Term: 3})
 	waitForCondition(t, func() bool {
-		return slices.EqualFunc(cluster.stores["node-2"].Entries(), leaderLog, entriesEqual)
+		return slices.EqualFunc(cluster.stores["node-2"].Entries(), leaderAfterElection, entriesEqual)
 	}, "divergent follower repair")
 
-	if status := nodeStatus(t, cluster.nodes["node-1"]); status.CommitIndex != 0 {
-		t.Fatalf("old-term entries committed without a current-term entry: %+v", status)
+	if status := nodeStatus(t, cluster.nodes["node-1"]); status.CommitIndex != 4 {
+		t.Fatalf("leader no-op did not commit the existing prefix: %+v", status)
 	}
-	if got := cluster.transport.previousIndexes("node-2"); !slices.Contains(got, 3) || !slices.Contains(got, 2) || !slices.Contains(got, 1) {
-		t.Fatalf("follower retry previous indexes = %v, want conflict-hint jumps through 3, 2, and 1", got)
+	if got := cluster.transport.previousIndexes("node-2"); !slices.Contains(got, 4) || !slices.Contains(got, 2) || !slices.Contains(got, 1) {
+		t.Fatalf("follower retry previous indexes = %v, want conflict-hint jumps through 4, 2, and 1", got)
 	}
 
 	command := []byte("current-term")
 	index, err := cluster.nodes["node-1"].Propose(context.Background(), command)
-	if err != nil || index != 4 {
-		t.Fatalf("Propose = %d, %v; want index 4", index, err)
+	if err != nil || index != 5 {
+		t.Fatalf("Propose = %d, %v; want index 5", index, err)
 	}
 	command[0] = 'X'
 	leader := waitForNodeStatus(t, cluster.nodes["node-1"], func(status raft.Status) bool {
-		return status.CommitIndex == 4
+		return status.CommitIndex == 5
 	})
-	if leader.Term != 3 || leader.LastLogIndex != 4 || leader.LastLogTerm != 3 {
+	if leader.Term != 3 || leader.LastLogIndex != 5 || leader.LastLogTerm != 3 {
 		t.Fatalf("leader status after commit = %+v", leader)
 	}
 	waitForNodeStatus(t, cluster.nodes["node-2"], func(status raft.Status) bool {
-		return status.CommitIndex == 4
+		return status.CommitIndex == 5
 	})
 	wantApplied := [][]byte{[]byte("one"), []byte("two"), []byte("three"), []byte("current-term")}
 	for _, id := range testMembers {
@@ -64,7 +65,7 @@ func TestLeaderRepairsDivergentFollowerAndCommitsCurrentTermEntry(t *testing.T) 
 	}
 	before := cluster.machines["node-2"].Commands()
 	response, err := cluster.nodes["node-2"].HandleAppendEntries(context.Background(), raft.AppendEntriesRequest{
-		Term: 3, LeaderID: "node-1", PrevLogIndex: 4, PrevLogTerm: 3, LeaderCommit: 4,
+		Term: 3, LeaderID: "node-1", PrevLogIndex: 5, PrevLogTerm: 3, LeaderCommit: 5,
 	})
 	if err != nil || !response.Success {
 		t.Fatalf("duplicate commit heartbeat = %+v, %v", response, err)
@@ -72,7 +73,7 @@ func TestLeaderRepairsDivergentFollowerAndCommitsCurrentTermEntry(t *testing.T) 
 	if after := cluster.machines["node-2"].Commands(); !slices.EqualFunc(after, before, slices.Equal) {
 		t.Fatalf("duplicate heartbeat reapplied commands: before=%q after=%q", before, after)
 	}
-	if got := cluster.stores["node-1"].Entries()[3].Command; string(got) != "current-term" {
+	if got := cluster.stores["node-1"].Entries()[4].Command; string(got) != "current-term" {
 		t.Fatalf("stored command = %q, want owned proposal bytes", got)
 	}
 }
@@ -101,7 +102,7 @@ func TestProposalWaitsForStateMachineApplication(t *testing.T) {
 		t.Fatalf("Propose after Apply: %v", err)
 	}
 	status := nodeStatus(t, cluster.nodes["node-1"])
-	if status.CommitIndex != 1 || status.LastApplied != 1 {
+	if status.CommitIndex != 2 || status.LastApplied != 2 {
 		t.Fatalf("status after application = %+v", status)
 	}
 }
@@ -112,14 +113,14 @@ func TestLeaderCommitsWithMajorityButNotMinority(t *testing.T) {
 	cluster.elect(t, "node-1")
 
 	cluster.network.Unregister("node-3")
-	if index, err := cluster.nodes["node-1"].Propose(context.Background(), []byte("majority")); err != nil || index != 1 {
+	if index, err := cluster.nodes["node-1"].Propose(context.Background(), []byte("majority")); err != nil || index != 2 {
 		t.Fatalf("majority Propose = %d, %v", index, err)
 	}
 	waitForNodeStatus(t, cluster.nodes["node-1"], func(status raft.Status) bool {
-		return status.CommitIndex == 1
+		return status.CommitIndex == 2
 	})
 	waitForNodeStatus(t, cluster.nodes["node-2"], func(status raft.Status) bool {
-		return status.CommitIndex == 1
+		return status.CommitIndex == 2
 	})
 
 	cluster.network.Unregister("node-2")
@@ -131,14 +132,14 @@ func TestLeaderCommitsWithMajorityButNotMinority(t *testing.T) {
 	waitForCondition(t, func() bool {
 		return cluster.transport.appendCount("node-2") >= 2 && cluster.transport.appendCount("node-3") >= 2
 	}, "minority replication attempts")
-	if status := nodeStatus(t, cluster.nodes["node-1"]); status.CommitIndex != 1 || status.LastLogIndex != 2 {
+	if status := nodeStatus(t, cluster.nodes["node-1"]); status.CommitIndex != 2 || status.LastLogIndex != 3 {
 		t.Fatalf("minority advanced commit index: %+v", status)
 	}
 }
 
 func TestProposalRequiresLeaderAndStopsOnLocalPersistenceFailure(t *testing.T) {
 	node, _ := newTestNode(t)
-	if _, err := node.Propose(context.Background(), []byte("no leader")); err != raft.ErrNotLeader {
+	if _, err := node.Propose(context.Background(), []byte("no leader")); !errors.Is(err, raft.ErrNotLeader) {
 		t.Fatalf("follower Propose error = %v, want ErrNotLeader", err)
 	}
 	_ = node.Close()

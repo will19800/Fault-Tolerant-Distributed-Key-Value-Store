@@ -88,6 +88,10 @@ func (p *applyingProposer) Propose(_ context.Context, command []byte) (raft.LogI
 	return raft.LogIndex(p.proposals), nil
 }
 
+func (p *applyingProposer) ReadIndex(context.Context) (raft.LogIndex, error) {
+	return raft.LogIndex(p.proposals), nil
+}
+
 type capturingProposer struct {
 	command []byte
 }
@@ -95,4 +99,8 @@ type capturingProposer struct {
 func (p *capturingProposer) Propose(_ context.Context, command []byte) (raft.LogIndex, error) {
 	p.command = append([]byte(nil), command...)
 	return 1, nil
+}
+
+func (p *capturingProposer) ReadIndex(context.Context) (raft.LogIndex, error) {
+	return 0, nil
 }

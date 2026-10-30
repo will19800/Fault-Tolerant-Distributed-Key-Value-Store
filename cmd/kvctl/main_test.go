@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -10,6 +11,31 @@ import (
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/api"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/storage"
 )
+
+func TestClientDisplaysLeaderHintAndUnknownWriteOutcome(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("timeout") == "true" {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_, _ = w.Write([]byte(`{"code":"timeout","message":"request timed out; write outcome may be unknown","outcome":"unknown"}`))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"code":"not_leader","message":"request must be sent to the current leader","leader_id":"node-2"}`))
+	}))
+	defer server.Close()
+
+	assertRun(t, server.URL, []string{"put", "key", "value"}, exitFailure, "", "not_leader: request must be sent to the current leader\nknown leader: node-2\n")
+
+	var stdout, stderr bytes.Buffer
+	client := server.Client()
+	if got := request(context.Background(), client, http.MethodPut, server.URL+"/?timeout=true", strings.NewReader("value"), &stdout, &stderr); got != exitFailure {
+		t.Fatalf("timeout exit = %d", got)
+	}
+	if !strings.Contains(stderr.String(), "did not retry because this write may already have committed") {
+		t.Fatalf("timeout stderr = %q", stderr.String())
+	}
+}
 
 func TestKeyLifecycle(t *testing.T) {
 	server := newTestServer(t)

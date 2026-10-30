@@ -25,7 +25,24 @@ var (
 	ErrUnknownMember = errors.New("unknown Raft member")
 	// ErrNotLeader is returned when a proposal targets a follower or candidate.
 	ErrNotLeader = errors.New("Raft node is not the leader")
+	// ErrEmptyCommand is returned because an empty command is reserved for the
+	// leader no-op entry used to establish current-term commitment.
+	ErrEmptyCommand = errors.New("Raft command must not be empty")
 )
+
+// NotLeaderError includes the last leader known to the receiving node.
+type NotLeaderError struct {
+	LeaderID NodeID
+}
+
+func (e NotLeaderError) Error() string {
+	if e.LeaderID == "" {
+		return ErrNotLeader.Error()
+	}
+	return fmt.Sprintf("%s; known leader is %q", ErrNotLeader, e.LeaderID)
+}
+
+func (e NotLeaderError) Unwrap() error { return ErrNotLeader }
 
 // RandomSource supplies election-timeout jitter.
 type RandomSource interface {
@@ -127,12 +144,32 @@ func (n *Node) Status(ctx context.Context) (Status, error) {
 // Propose durably appends a command and waits until it is committed and
 // applied locally. A context error leaves the proposal outcome ambiguous.
 func (n *Node) Propose(ctx context.Context, command []byte) (LogIndex, error) {
+	if len(command) == 0 {
+		return 0, ErrEmptyCommand
+	}
 	if len(command) > MaxCommandBytes {
 		return 0, fmt.Errorf("command exceeds %d bytes", MaxCommandBytes)
 	}
 	reply := make(chan proposalResult, 1)
 	event := proposalEvent{command: slices.Clone(command), reply: reply}
 	if err := n.submit(ctx, event); err != nil {
+		return 0, err
+	}
+	select {
+	case result := <-reply:
+		return result.index, result.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-n.done:
+		return 0, n.stoppedError()
+	}
+}
+
+// ReadIndex confirms current leadership with a quorum and returns an index
+// that has been applied locally. Reading state after this call is linearizable.
+func (n *Node) ReadIndex(ctx context.Context) (LogIndex, error) {
+	reply := make(chan readResult, 1)
+	if err := n.submit(ctx, readBarrierEvent{ctx: ctx, reply: reply}); err != nil {
 		return 0, err
 	}
 	select {
@@ -240,6 +277,8 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 	matchIndex := make(map[NodeID]LogIndex, len(peers))
 	appendInFlight := make(map[NodeID]bool, len(peers))
 	pendingProposals := make(map[LogIndex][]chan<- proposalResult)
+	readRounds := make(map[uint64]*readRound)
+	var nextReadRound uint64
 
 	cancelElection := func() {
 		if electionCancel != nil {
@@ -289,9 +328,18 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 			delete(pendingProposals, index)
 		}
 	}
+	failReadRounds := func(err error) {
+		for id, round := range readRounds {
+			round.reply <- readResult{err: err}
+			close(round.done)
+			delete(readRounds, id)
+		}
+	}
 	becomeFollower := func(leader NodeID) {
 		if state.Role == Leader {
-			failPendingProposals(ErrNotLeader)
+			notLeader := NotLeaderError{LeaderID: leader}
+			failPendingProposals(notLeader)
+			failReadRounds(notLeader)
 		}
 		cancelElection()
 		cancelLeader()
@@ -310,8 +358,10 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 				return fmt.Errorf("committed index %d exceeds log length %d", state.CommitIndex, len(logEntries))
 			}
 			entry := logEntries[next-1]
-			if err := config.StateMachine.Apply(slices.Clone(entry.Command)); err != nil {
-				return fmt.Errorf("apply committed entry %d: %w", next, err)
+			if len(entry.Command) != 0 {
+				if err := config.StateMachine.Apply(slices.Clone(entry.Command)); err != nil {
+					return fmt.Errorf("apply committed entry %d: %w", next, err)
+				}
 			}
 			state.LastApplied = next
 			for _, reply := range pendingProposals[next] {
@@ -378,12 +428,57 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 			sendReplication(ctx, peer, term)
 		}
 	}
+	currentTermCommitted := func() bool {
+		return state.CommitIndex > 0 && logEntries[state.CommitIndex-1].Term == state.Term
+	}
+	completeReadRounds := func() {
+		if !currentTermCommitted() || state.LastApplied < state.CommitIndex {
+			return
+		}
+		for id, round := range readRounds {
+			if len(round.acknowledgements) < quorum {
+				continue
+			}
+			round.reply <- readResult{index: state.CommitIndex}
+			close(round.done)
+			delete(readRounds, id)
+		}
+	}
+	sendReadRound := func(ctx context.Context, roundID uint64, term Term) {
+		lastIndex, lastTerm := lastLogPosition(logEntries)
+		request := AppendEntriesRequest{
+			Term: term, LeaderID: config.ID, PrevLogIndex: lastIndex,
+			PrevLogTerm: lastTerm, LeaderCommit: state.CommitIndex,
+		}
+		for _, peer := range peers {
+			go func(peer NodeID) {
+				response, err := config.Transport.AppendEntries(ctx, peer, request)
+				if err == nil {
+					err = response.Validate()
+				}
+				_ = n.submit(ctx, readRPCEvent{
+					roundID: roundID, peer: peer, requestTerm: term,
+					response: response, err: err,
+				})
+			}(peer)
+		}
+	}
 	becomeLeader := func() error {
 		cancelElection()
 		state.Role = Leader
 		state.LeaderID = config.ID
 		electionTimer.Stop()
 		leaderContext, leaderCancel = context.WithCancel(context.Background())
+		if state.LastLogIndex == ^LogIndex(0) {
+			return errors.New("Raft log index overflow")
+		}
+		noOp := Entry{Index: state.LastLogIndex + 1, Term: state.Term}
+		nextLog := append(cloneEntries(logEntries), noOp)
+		if err := config.LogStore.Save(nextLog); err != nil {
+			return fmt.Errorf("persist leader no-op entry %d: %w", noOp.Index, err)
+		}
+		logEntries = nextLog
+		state.LastLogIndex, state.LastLogTerm = lastLogPosition(logEntries)
 		lastIndex, _ := lastLogPosition(logEntries)
 		for _, peer := range peers {
 			nextIndex[peer] = lastIndex + 1
@@ -440,9 +535,44 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 			switch event := rawEvent.(type) {
 			case statusEvent:
 				event.reply <- state
+			case readBarrierEvent:
+				if state.Role != Leader {
+					event.reply <- readResult{err: NotLeaderError{LeaderID: state.LeaderID}}
+					continue
+				}
+				nextReadRound++
+				if nextReadRound == 0 {
+					event.reply <- readResult{err: errors.New("read round overflow")}
+					continue
+				}
+				readRounds[nextReadRound] = &readRound{
+					reply: event.reply, done: make(chan struct{}),
+					acknowledgements: map[NodeID]struct{}{config.ID: {}},
+				}
+				roundDone := readRounds[nextReadRound].done
+				roundID := nextReadRound
+				roundContext := event.ctx
+				leadershipDone := leaderContext.Done()
+				go func() {
+					select {
+					case <-roundContext.Done():
+						_ = n.submit(context.Background(), cancelReadEvent{roundID: roundID, err: roundContext.Err()})
+					case <-leadershipDone:
+					case <-roundDone:
+					}
+				}()
+				sendReadRound(leaderContext, nextReadRound, state.Term)
+				completeReadRounds()
+			case cancelReadEvent:
+				round := readRounds[event.roundID]
+				if round != nil {
+					round.reply <- readResult{err: event.err}
+					close(round.done)
+					delete(readRounds, event.roundID)
+				}
 			case proposalEvent:
 				if state.Role != Leader {
-					event.reply <- proposalResult{err: ErrNotLeader}
+					event.reply <- proposalResult{err: NotLeaderError{LeaderID: state.LeaderID}}
 					continue
 				}
 				if state.LastLogIndex == ^LogIndex(0) {
@@ -570,6 +700,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 							return fmt.Errorf("apply leader commit through %d: %w", state.CommitIndex, err)
 						}
 						sendAllReplication(leaderContext, state.Term)
+						completeReadRounds()
 					} else if nextIndex[event.peer] <= state.LastLogIndex || event.requestCommit < state.CommitIndex {
 						sendReplication(leaderContext, event.peer, state.Term)
 					}
@@ -583,6 +714,26 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 					nextIndex[event.peer] = retryAt
 					sendReplication(leaderContext, event.peer, state.Term)
 				}
+			case readRPCEvent:
+				if state.Role != Leader || event.requestTerm != state.Term {
+					continue
+				}
+				if event.err == nil && event.response.Term > state.Term {
+					if err := persistTerm(event.response.Term); err != nil {
+						return fmt.Errorf("persist read-response term %d: %w", event.response.Term, err)
+					}
+					becomeFollower("")
+					continue
+				}
+				if event.err != nil || event.response.Term != state.Term {
+					continue
+				}
+				round := readRounds[event.roundID]
+				if round == nil {
+					continue
+				}
+				round.acknowledgements[event.peer] = struct{}{}
+				completeReadRounds()
 			}
 		case <-n.stop:
 			return nil
@@ -673,6 +824,27 @@ type statusEvent struct {
 	reply chan<- Status
 }
 
+type readBarrierEvent struct {
+	ctx   context.Context
+	reply chan<- readResult
+}
+
+type cancelReadEvent struct {
+	roundID uint64
+	err     error
+}
+
+type readResult struct {
+	index LogIndex
+	err   error
+}
+
+type readRound struct {
+	reply            chan<- readResult
+	done             chan struct{}
+	acknowledgements map[NodeID]struct{}
+}
+
 type proposalEvent struct {
 	command []byte
 	reply   chan<- proposalResult
@@ -717,4 +889,12 @@ type appendRPCEvent struct {
 	requestCommit LogIndex
 	response      AppendEntriesResponse
 	err           error
+}
+
+type readRPCEvent struct {
+	roundID     uint64
+	peer        NodeID
+	requestTerm Term
+	response    AppendEntriesResponse
+	err         error
 }

@@ -28,7 +28,7 @@ func TestThreeNodeClusterElectsAndReplacesLeader(t *testing.T) {
 	followerVotes := 0
 	for _, id := range []raft.NodeID{"node-2", "node-3"} {
 		follower := waitForNodeStatus(t, cluster.nodes[id], func(status raft.Status) bool {
-			return status.Term == 1 && status.LeaderID == "node-1"
+			return status.Term == 1 && status.LeaderID == "node-1" && status.LastLogIndex == 1
 		})
 		if follower.Role != raft.Follower {
 			t.Fatalf("follower %q status = %+v", id, follower)

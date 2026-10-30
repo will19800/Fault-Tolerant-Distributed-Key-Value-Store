@@ -125,12 +125,20 @@ func request(ctx context.Context, client *http.Client, method, endpoint string, 
 
 func handleErrorResponse(response *http.Response, stderr io.Writer) int {
 	var apiError struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code     string `json:"code"`
+		Message  string `json:"message"`
+		LeaderID string `json:"leader_id"`
+		Outcome  string `json:"outcome"`
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 	if err == nil && json.Unmarshal(body, &apiError) == nil && apiError.Code != "" {
 		fmt.Fprintf(stderr, "%s: %s\n", apiError.Code, apiError.Message)
+		if apiError.LeaderID != "" {
+			fmt.Fprintf(stderr, "known leader: %s\n", apiError.LeaderID)
+		}
+		if apiError.Outcome == "unknown" {
+			fmt.Fprintln(stderr, "the client did not retry because this write may already have committed")
+		}
 	} else {
 		fmt.Fprintf(stderr, "server returned %s\n", response.Status)
 	}

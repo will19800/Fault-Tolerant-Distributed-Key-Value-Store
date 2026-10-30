@@ -59,3 +59,21 @@ go run ./cmd/kvctl health
 ```
 
 Pass `-server http://host:port` to use another server. Run either command with `-help` to see its available flags.
+
+## Cluster client semantics
+
+Cluster reads use a Raft read barrier: the leader first confirms its current
+term with a quorum and waits until its state machine has applied through the
+confirmed commit index. An isolated former leader therefore cannot serve a
+successful read.
+
+A follower returns HTTP `503` with error code `not_leader` and `leader_id`
+when it knows the current leader. A client may safely send that rejected
+request to the leader because the follower did not accept it.
+
+HTTP `504` on a read is safe to retry. HTTP `504` on `PUT` or `DELETE` reports
+`outcome: "unknown"`: the command may have committed even though its response
+was lost. `kvctl` does not automatically retry such writes because request
+deduplication is not implemented. Retrying manually is safe for the current
+idempotent full-value PUT and DELETE operations, but a retry may create a
+second Raft log entry.

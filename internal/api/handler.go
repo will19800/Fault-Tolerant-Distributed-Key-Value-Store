@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
+	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/raft"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/storage"
 )
 
@@ -22,6 +24,12 @@ type Store interface {
 	Put(key string, value []byte) error
 	Get(key string) ([]byte, error)
 	Delete(key string) error
+}
+
+type contextStore interface {
+	PutContext(context.Context, string, []byte) error
+	GetContext(context.Context, string) ([]byte, error)
+	DeleteContext(context.Context, string) error
 }
 
 // Handler serves the key-value HTTP API.
@@ -73,8 +81,14 @@ func (h *Handler) put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.Put(key, value); err != nil {
-		writeStoreError(w, err)
+	var storeErr error
+	if store, ok := h.store.(contextStore); ok {
+		storeErr = store.PutContext(r.Context(), key, value)
+	} else {
+		storeErr = h.store.Put(key, value)
+	}
+	if storeErr != nil {
+		writeStoreError(w, storeErr, true)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -86,9 +100,15 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	value, err := h.store.Get(key)
+	var value []byte
+	var err error
+	if store, ok := h.store.(contextStore); ok {
+		value, err = store.GetContext(r.Context(), key)
+	} else {
+		value, err = h.store.Get(key)
+	}
 	if err != nil {
-		writeStoreError(w, err)
+		writeStoreError(w, err, false)
 		return
 	}
 
@@ -103,8 +123,14 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.Delete(key); err != nil {
-		writeStoreError(w, err)
+	var storeErr error
+	if store, ok := h.store.(contextStore); ok {
+		storeErr = store.DeleteContext(r.Context(), key)
+	} else {
+		storeErr = h.store.Delete(key)
+	}
+	if storeErr != nil {
+		writeStoreError(w, storeErr, true)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -127,20 +153,39 @@ func validKey(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return key, true
 }
 
-func writeStoreError(w http.ResponseWriter, err error) {
+func writeStoreError(w http.ResponseWriter, err error, mutation bool) {
 	switch {
 	case errors.Is(err, storage.ErrEmptyKey):
 		writeError(w, http.StatusBadRequest, "empty_key", "key must not be empty")
 	case errors.Is(err, storage.ErrKeyNotFound):
 		writeError(w, http.StatusNotFound, "key_not_found", "key does not exist")
+	case errors.Is(err, raft.ErrNotLeader):
+		var notLeader raft.NotLeaderError
+		errors.As(err, &notLeader)
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{
+			Code: "not_leader", Message: "request must be sent to the current leader",
+			LeaderID: string(notLeader.LeaderID), Retryable: true,
+		})
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		response := errorResponse{Code: "timeout", Retryable: !mutation}
+		if mutation {
+			response.Message = "request timed out; write outcome may be unknown"
+			response.Outcome = "unknown"
+		} else {
+			response.Message = "read timed out before quorum confirmation"
+		}
+		writeJSON(w, http.StatusGatewayTimeout, response)
 	default:
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 	}
 }
 
 type errorResponse struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	LeaderID  string `json:"leader_id,omitempty"`
+	Retryable bool   `json:"retryable,omitempty"`
+	Outcome   string `json:"outcome,omitempty"`
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

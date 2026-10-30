@@ -45,3 +45,7 @@ func (p *handlerProposer) Propose(_ context.Context, command []byte) (raft.LogIn
 	}
 	return raft.LogIndex(p.proposals), nil
 }
+
+func (p *handlerProposer) ReadIndex(context.Context) (raft.LogIndex, error) {
+	return raft.LogIndex(p.proposals), nil
+}

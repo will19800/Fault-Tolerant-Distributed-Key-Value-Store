@@ -56,6 +56,38 @@ func TestParseServer(t *testing.T) {
 	}
 }
 
+func TestParseClusterServer(t *testing.T) {
+	cfg, err := config.ParseServer([]string{
+		"-addr", "127.0.0.1:8081", "-data-dir", "/tmp/node-1",
+		"-node-id", "node-1", "-peer-addr", "127.0.0.1:9081",
+		"-peers", "node-1=127.0.0.1:9081,node-2=127.0.0.1:9082,node-3=127.0.0.1:9083",
+		"-rpc-timeout", "100ms", "-election-timeout", "400ms", "-heartbeat-interval", "75ms",
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("ParseServer: %v", err)
+	}
+	if !cfg.Clustered() || cfg.NodeID != "node-1" || cfg.PeerAddress != "127.0.0.1:9081" || len(cfg.Peers) != 3 {
+		t.Fatalf("cluster config = %+v", cfg)
+	}
+	if cfg.RPCTimeout != 100*time.Millisecond || cfg.ElectionTimeout != 400*time.Millisecond || cfg.HeartbeatInterval != 75*time.Millisecond {
+		t.Fatalf("cluster timeouts = %+v", cfg)
+	}
+}
+
+func TestClusterConfigurationRequiresCompleteUniqueMembership(t *testing.T) {
+	tests := [][]string{
+		{"-node-id", "node-1"},
+		{"-node-id", "node-1", "-peer-addr", "127.0.0.1:9081", "-peers", "node-1=127.0.0.1:9081,node-2=127.0.0.1:9082"},
+		{"-node-id", "node-1", "-peer-addr", "127.0.0.1:9081", "-peers", "node-1=127.0.0.1:9081,node-2=127.0.0.1:9081,node-3=127.0.0.1:9083"},
+		{"-node-id", "node-1", "-peer-addr", "127.0.0.1:9999", "-peers", "node-1=127.0.0.1:9081,node-2=127.0.0.1:9082,node-3=127.0.0.1:9083"},
+	}
+	for _, args := range tests {
+		if _, err := config.ParseServer(args, io.Discard); err == nil {
+			t.Fatalf("ParseServer(%v) returned nil error", args)
+		}
+	}
+}
+
 func TestParseServerHelp(t *testing.T) {
 	var output strings.Builder
 	_, err := config.ParseServer([]string{"-help"}, &output)

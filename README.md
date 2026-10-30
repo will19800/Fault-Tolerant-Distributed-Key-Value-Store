@@ -77,3 +77,23 @@ was lost. `kvctl` does not automatically retry such writes because request
 deduplication is not implemented. Retrying manually is safe for the current
 idempotent full-value PUT and DELETE operations, but a retry may create a
 second Raft log entry.
+
+## Run a local cluster
+
+Launch three or five nodes with isolated client ports, Raft peer ports, and
+data directories:
+
+```sh
+make cluster-3
+# or
+make cluster-5
+```
+
+Client endpoints use ports `8001` through `8003` for three nodes and through
+`8005` for five. Peer traffic follows the same pattern on ports `9001` through
+`9005`. Logs and durable state are stored under
+`.local/cluster-3/` or `.local/cluster-5/`. Stop every node with Ctrl-C.
+
+Send requests to the elected leader. A follower responds with `not_leader`
+and its known Raft node ID; use the printed node-to-URL list to select that
+node's client endpoint.

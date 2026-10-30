@@ -29,6 +29,7 @@ go.work.sum
 
 # Default runtime data directory
 /data/
+/.local/
 
 # Editor/IDE
 # .idea/

@@ -170,6 +170,7 @@ type replicationCluster struct {
 	timers    map[raft.NodeID]*recordingTimer
 	stores    map[raft.NodeID]*memoryLogStore
 	machines  map[raft.NodeID]*memoryStateMachine
+	members   []raft.NodeID
 }
 
 func newReplicationCluster(t *testing.T, logs map[raft.NodeID][]raft.Entry) *replicationCluster {
@@ -178,22 +179,27 @@ func newReplicationCluster(t *testing.T, logs map[raft.NodeID][]raft.Entry) *rep
 	for _, id := range testMembers {
 		stores[id] = newMemoryLogStore(logs[id])
 	}
-	return newReplicationClusterWithStores(t, stores)
+	return newReplicationClusterWithMembers(t, testMembers, stores, nil)
 }
 
 func newReplicationClusterWithStores(t *testing.T, supplied map[raft.NodeID]*memoryLogStore) *replicationCluster {
-	return newReplicationClusterWithDependencies(t, supplied, nil)
+	return newReplicationClusterWithMembers(t, testMembers, supplied, nil)
 }
 
 func newReplicationClusterWithDependencies(t *testing.T, supplied map[raft.NodeID]*memoryLogStore, suppliedMachines map[raft.NodeID]raft.StateMachine) *replicationCluster {
+	return newReplicationClusterWithMembers(t, testMembers, supplied, suppliedMachines)
+}
+
+func newReplicationClusterWithMembers(t *testing.T, members []raft.NodeID, supplied map[raft.NodeID]*memoryLogStore, suppliedMachines map[raft.NodeID]raft.StateMachine) *replicationCluster {
 	t.Helper()
 	network := transport.NewMemoryNetwork()
 	cluster := &replicationCluster{
 		network: network, transport: &recordingTransport{network: network},
 		nodes: make(map[raft.NodeID]*raft.Node), timers: make(map[raft.NodeID]*recordingTimer),
 		stores: make(map[raft.NodeID]*memoryLogStore), machines: make(map[raft.NodeID]*memoryStateMachine),
+		members: slices.Clone(members),
 	}
-	for _, id := range testMembers {
+	for _, id := range members {
 		store := supplied[id]
 		if store == nil {
 			store = newMemoryLogStore(nil)
@@ -206,7 +212,7 @@ func newReplicationClusterWithDependencies(t *testing.T, supplied map[raft.NodeI
 			machine = memoryMachine
 		}
 		node, err := raft.NewNode(raft.NodeConfig{
-			ID: id, Members: testMembers, Transport: cluster.transport,
+			ID: id, Members: members, Transport: cluster.transport,
 			ElectionTimeout: time.Second, MaximumElectionTimeout: time.Second,
 			HeartbeatInterval: 100 * time.Millisecond, Clock: clock,
 			Persistence: newMemoryHardStateStore(raft.HardState{CurrentTerm: 2}), LogStore: store,
@@ -241,8 +247,13 @@ func (c *replicationCluster) elect(t *testing.T, id raft.NodeID) {
 	t.Helper()
 	c.timers[id].Fire()
 	waitForNodeStatus(t, c.nodes[id], func(status raft.Status) bool {
-		return status.Role == raft.Leader && status.Term == 3
+		return status.Role == raft.Leader
 	})
+}
+
+func (c *replicationCluster) stop(id raft.NodeID) {
+	c.network.Unregister(id)
+	_ = c.nodes[id].Close()
 }
 
 func (c *replicationCluster) Close() {

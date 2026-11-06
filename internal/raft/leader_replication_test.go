@@ -170,6 +170,7 @@ type replicationCluster struct {
 	timers    map[raft.NodeID]*recordingTimer
 	stores    map[raft.NodeID]*memoryLogStore
 	machines  map[raft.NodeID]*memoryStateMachine
+	snapshots map[raft.NodeID]*memorySnapshotStore
 	members   []raft.NodeID
 }
 
@@ -197,7 +198,8 @@ func newReplicationClusterWithMembers(t *testing.T, members []raft.NodeID, suppl
 		network: network, transport: &recordingTransport{network: network},
 		nodes: make(map[raft.NodeID]*raft.Node), timers: make(map[raft.NodeID]*recordingTimer),
 		stores: make(map[raft.NodeID]*memoryLogStore), machines: make(map[raft.NodeID]*memoryStateMachine),
-		members: slices.Clone(members),
+		snapshots: make(map[raft.NodeID]*memorySnapshotStore),
+		members:   slices.Clone(members),
 	}
 	for _, id := range members {
 		store := supplied[id]
@@ -211,12 +213,13 @@ func newReplicationClusterWithMembers(t *testing.T, members []raft.NodeID, suppl
 			memoryMachine = newMemoryStateMachine()
 			machine = memoryMachine
 		}
+		snapshotStore := &memorySnapshotStore{}
 		node, err := raft.NewNode(raft.NodeConfig{
 			ID: id, Members: members, Transport: cluster.transport,
 			ElectionTimeout: time.Second, MaximumElectionTimeout: time.Second,
 			HeartbeatInterval: 100 * time.Millisecond, Clock: clock,
 			Persistence: newMemoryHardStateStore(raft.HardState{CurrentTerm: 2}), LogStore: store,
-			StateMachine: machine,
+			StateMachine: machine, SnapshotStore: snapshotStore,
 		})
 		if err != nil {
 			t.Fatalf("NewNode(%q): %v", id, err)
@@ -225,6 +228,7 @@ func newReplicationClusterWithMembers(t *testing.T, members []raft.NodeID, suppl
 			t.Fatalf("Register(%q): %v", id, err)
 		}
 		cluster.nodes[id], cluster.timers[id], cluster.stores[id] = node, clock.Timer(0), store
+		cluster.snapshots[id] = snapshotStore
 		if ok || suppliedMachines[id] == nil {
 			cluster.machines[id] = memoryMachine
 		}
@@ -281,6 +285,10 @@ func (t *recordingTransport) AppendEntries(ctx context.Context, target raft.Node
 	t.appends[target] = append(t.appends[target], request)
 	t.mu.Unlock()
 	return t.network.AppendEntries(ctx, target, request)
+}
+
+func (t *recordingTransport) InstallSnapshot(ctx context.Context, target raft.NodeID, request raft.InstallSnapshotRequest) (raft.InstallSnapshotResponse, error) {
+	return t.network.InstallSnapshot(ctx, target, request)
 }
 
 func (t *recordingTransport) previousIndexes(target raft.NodeID) []raft.LogIndex {

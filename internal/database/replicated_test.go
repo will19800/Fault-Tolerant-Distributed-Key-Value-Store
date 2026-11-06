@@ -1,6 +1,7 @@
 package database_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -62,6 +63,36 @@ func TestReplicatedStateMachineRejectsMalformedOrMultipleCommands(t *testing.T) 
 	}
 	if _, err := state.Get("one"); !errors.Is(err, storage.ErrKeyNotFound) {
 		t.Fatalf("malformed application changed state: %v", err)
+	}
+}
+
+func TestReplicatedStateMachineSnapshotRoundTripIsDeterministic(t *testing.T) {
+	first := database.NewReplicatedStateMachine()
+	firstStore, _ := database.NewReplicatedStore(&applyingProposer{state: first}, first)
+	if err := firstStore.Put("z", []byte("last")); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstStore.Put("a", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := first.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restored := database.NewReplicatedStateMachine()
+	if err := restored.Restore(encoded); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := restored.Get("a"); err != nil || string(value) != "first" {
+		t.Fatalf("restored Get = %q, %v", value, err)
+	}
+	reencoded, err := restored.Snapshot()
+	if err != nil || !bytes.Equal(reencoded, encoded) {
+		t.Fatalf("reencoded snapshot differs: %x, %v", reencoded, err)
+	}
+	if err := restored.Restore(append(encoded, 0)); err == nil {
+		t.Fatal("Restore accepted trailing data")
 	}
 }
 

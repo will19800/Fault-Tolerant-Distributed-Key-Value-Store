@@ -113,6 +113,42 @@ func (r AppendEntriesResponse) Validate() error {
 	return nil
 }
 
+// InstallSnapshotRequest transfers state when a follower is behind the
+// leader's compacted log boundary.
+type InstallSnapshotRequest struct {
+	Term              Term     `json:"term"`
+	LeaderID          NodeID   `json:"leader_id"`
+	LastIncludedIndex LogIndex `json:"last_included_index"`
+	LastIncludedTerm  Term     `json:"last_included_term"`
+	State             []byte   `json:"state"`
+}
+
+func (r InstallSnapshotRequest) Validate() error {
+	if r.Term == 0 {
+		return fmt.Errorf("install snapshot term must be positive")
+	}
+	if err := r.LeaderID.Validate(); err != nil {
+		return fmt.Errorf("leader ID: %w", err)
+	}
+	if r.LastIncludedIndex == 0 {
+		return fmt.Errorf("snapshot index must be positive")
+	}
+	return validateLogPosition(r.LastIncludedIndex, r.LastIncludedTerm, "snapshot")
+}
+
+// InstallSnapshotResponse reports the follower term and installed position.
+type InstallSnapshotResponse struct {
+	Term       Term     `json:"term"`
+	MatchIndex LogIndex `json:"match_index"`
+}
+
+func (r InstallSnapshotResponse) Validate() error {
+	if r.Term == 0 {
+		return fmt.Errorf("install snapshot response term must be positive")
+	}
+	return nil
+}
+
 func validateLogPosition(index LogIndex, term Term, name string) error {
 	if index == 0 && term != 0 {
 		return fmt.Errorf("%s term must be zero when index is zero", name)

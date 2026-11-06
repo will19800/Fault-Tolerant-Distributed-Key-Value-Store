@@ -100,6 +100,33 @@ func (n *MemoryNetwork) AppendEntries(ctx context.Context, target raft.NodeID, r
 	return response, nil
 }
 
+// InstallSnapshot delivers a state snapshot to target.
+func (n *MemoryNetwork) InstallSnapshot(ctx context.Context, target raft.NodeID, request raft.InstallSnapshotRequest) (raft.InstallSnapshotResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return raft.InstallSnapshotResponse{}, err
+	}
+	if err := request.Validate(); err != nil {
+		return raft.InstallSnapshotResponse{}, fmt.Errorf("install snapshot request: %w", err)
+	}
+	handler, err := n.handler(target)
+	if err != nil {
+		return raft.InstallSnapshotResponse{}, err
+	}
+	snapshotReceiver, ok := handler.(snapshotHandler)
+	if !ok {
+		return raft.InstallSnapshotResponse{}, fmt.Errorf("peer %q does not support snapshot installation", target)
+	}
+	request.State = slices.Clone(request.State)
+	response, err := snapshotReceiver.HandleInstallSnapshot(ctx, request)
+	if err != nil {
+		return raft.InstallSnapshotResponse{}, err
+	}
+	if err := response.Validate(); err != nil {
+		return raft.InstallSnapshotResponse{}, fmt.Errorf("install snapshot response from %q: %w", target, err)
+	}
+	return response, nil
+}
+
 func (n *MemoryNetwork) handler(target raft.NodeID) (Handler, error) {
 	if err := target.Validate(); err != nil {
 		return nil, fmt.Errorf("target peer ID: %w", err)

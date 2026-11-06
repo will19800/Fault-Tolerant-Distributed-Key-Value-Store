@@ -128,6 +128,25 @@ func (s *FileLogStore) Compact(index LogIndex, term Term, suffix []Entry) error 
 	return nil
 }
 
+// InstallSnapshot replaces any local prefix with a received snapshot
+// boundary. The caller may retain a suffix only when it matches that snapshot.
+func (s *FileLogStore) InstallSnapshot(index LogIndex, term Term, suffix []Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index == 0 || term == 0 {
+		return errors.New("installed snapshot index and term must be positive")
+	}
+	frame, err := encodeLog(index, term, suffix)
+	if err != nil {
+		return err
+	}
+	if err := replaceFileAtomically(s.path, ".raft-log-*", frame); err != nil {
+		return err
+	}
+	s.baseIndex, s.baseTerm = index, term
+	return nil
+}
+
 func equalEntries(first, second []Entry) bool {
 	return slices.EqualFunc(first, second, func(a, b Entry) bool {
 		return a.Index == b.Index && a.Term == b.Term && bytes.Equal(a.Command, b.Command)

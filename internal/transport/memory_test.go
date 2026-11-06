@@ -39,8 +39,14 @@ func TestMemoryNetworkDeliversRPCsToTarget(t *testing.T) {
 	if want := (raft.AppendEntriesResponse{Term: 2, Success: true, MatchIndex: 1}); appendResponse != want {
 		t.Fatalf("AppendEntries response = %+v, want %+v", appendResponse, want)
 	}
+	snapshotResponse, err := network.InstallSnapshot(context.Background(), "node-2", raft.InstallSnapshotRequest{
+		Term: 2, LeaderID: "node-1", LastIncludedIndex: 4, LastIncludedTerm: 2, State: []byte("state"),
+	})
+	if err != nil || snapshotResponse.MatchIndex != 4 {
+		t.Fatalf("InstallSnapshot = %+v, %v", snapshotResponse, err)
+	}
 
-	if got, want := handler.calls(), []string{"vote:node-1", "append:put a=1"}; !reflect.DeepEqual(got, want) {
+	if got, want := handler.calls(), []string{"vote:node-1", "append:put a=1", "snapshot:state"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("delivery order = %v, want %v", got, want)
 	}
 }
@@ -151,6 +157,13 @@ func (h *recordingHandler) HandleAppendEntries(_ context.Context, request raft.A
 	}
 	h.deliveries = append(h.deliveries, "append:"+command)
 	return raft.AppendEntriesResponse{Term: request.Term, Success: true, MatchIndex: request.PrevLogIndex + raft.LogIndex(len(request.Entries))}, nil
+}
+
+func (h *recordingHandler) HandleInstallSnapshot(_ context.Context, request raft.InstallSnapshotRequest) (raft.InstallSnapshotResponse, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.deliveries = append(h.deliveries, "snapshot:"+string(request.State))
+	return raft.InstallSnapshotResponse{Term: request.Term, MatchIndex: request.LastIncludedIndex}, nil
 }
 
 func (h *recordingHandler) calls() []string {

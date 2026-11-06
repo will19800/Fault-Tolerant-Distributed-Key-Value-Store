@@ -39,7 +39,13 @@ func TestHTTPTransportExchangesRaftRPCs(t *testing.T) {
 	if want := (raft.AppendEntriesResponse{Term: 3, Success: true, MatchIndex: 1}); appendResponse != want {
 		t.Fatalf("AppendEntries response = %+v, want %+v", appendResponse, want)
 	}
-	if got, want := receiver.calls(), []string{"vote:node-1", "append:put a=1"}; !reflect.DeepEqual(got, want) {
+	snapshotResponse, err := sender.InstallSnapshot(context.Background(), "node-2", raft.InstallSnapshotRequest{
+		Term: 3, LeaderID: "node-1", LastIncludedIndex: 5, LastIncludedTerm: 3, State: []byte("state"),
+	})
+	if err != nil || snapshotResponse.MatchIndex != 5 {
+		t.Fatalf("InstallSnapshot = %+v, %v", snapshotResponse, err)
+	}
+	if got, want := receiver.calls(), []string{"vote:node-1", "append:put a=1", "snapshot:state"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("received calls = %v, want %v", got, want)
 	}
 }

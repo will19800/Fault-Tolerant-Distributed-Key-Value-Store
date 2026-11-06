@@ -55,6 +55,10 @@ type PeerTransport interface {
 	AppendEntries(context.Context, NodeID, AppendEntriesRequest) (AppendEntriesResponse, error)
 }
 
+type snapshotTransport interface {
+	InstallSnapshot(context.Context, NodeID, InstallSnapshotRequest) (InstallSnapshotResponse, error)
+}
+
 // NodeConfig contains the dependencies needed by the Raft event loop.
 type NodeConfig struct {
 	ID                     NodeID
@@ -109,8 +113,39 @@ func NewNode(config NodeConfig) (*Node, error) {
 	if err := validateLogFrom(baseIndex, baseTerm, logEntries); err != nil {
 		return nil, fmt.Errorf("validate Raft log: %w", err)
 	}
-	if baseIndex > 0 {
-		return nil, fmt.Errorf("recover compacted Raft log at index %d: snapshot restoration is not implemented", baseIndex)
+	var recoveredSnapshot Snapshot
+	if config.SnapshotStore != nil {
+		recovered, err := config.SnapshotStore.Load()
+		if err != nil {
+			return nil, fmt.Errorf("load snapshot: %w", err)
+		}
+		if recovered.LastIncludedIndex > 0 {
+			recoveredSnapshot = recovered
+			machine, ok := config.StateMachine.(SnapshotStateMachine)
+			if !ok {
+				return nil, errors.New("restore snapshot: state machine does not support snapshots")
+			}
+			if baseIndex > recovered.LastIncludedIndex || (baseIndex == recovered.LastIncludedIndex && baseTerm != recovered.LastIncludedTerm) {
+				return nil, errors.New("snapshot and compacted log boundaries do not match")
+			}
+			if baseIndex < recovered.LastIncludedIndex {
+				suffix := retainedSuffixForSnapshot(baseIndex, baseTerm, logEntries, recovered.LastIncludedIndex, recovered.LastIncludedTerm)
+				compactor, ok := config.LogStore.(LogCompactor)
+				if !ok {
+					return nil, errors.New("recover snapshot: Raft log store does not support compaction")
+				}
+				if err := compactor.InstallSnapshot(recovered.LastIncludedIndex, recovered.LastIncludedTerm, suffix); err != nil {
+					return nil, fmt.Errorf("finish interrupted log compaction: %w", err)
+				}
+				baseIndex, baseTerm, logEntries = recovered.LastIncludedIndex, recovered.LastIncludedTerm, suffix
+			}
+			if err := machine.Restore(slices.Clone(recovered.State)); err != nil {
+				return nil, fmt.Errorf("restore state machine: %w", err)
+			}
+		}
+	}
+	if baseIndex > 0 && recoveredSnapshot.LastIncludedIndex == 0 {
+		return nil, fmt.Errorf("recover compacted Raft log at index %d: matching snapshot is unavailable", baseIndex)
 	}
 	logEntries = cloneEntries(logEntries)
 	electionTimer := config.Clock.NewTimer(nextElectionTimeout(config))
@@ -250,6 +285,28 @@ func (n *Node) HandleAppendEntries(ctx context.Context, request AppendEntriesReq
 		return AppendEntriesResponse{}, ctx.Err()
 	case <-n.done:
 		return AppendEntriesResponse{}, n.stoppedError()
+	}
+}
+
+// HandleInstallSnapshot serializes an incoming snapshot through the event loop.
+func (n *Node) HandleInstallSnapshot(ctx context.Context, request InstallSnapshotRequest) (InstallSnapshotResponse, error) {
+	if err := request.Validate(); err != nil {
+		return InstallSnapshotResponse{}, fmt.Errorf("install snapshot request: %w", err)
+	}
+	if _, exists := n.members[request.LeaderID]; !exists {
+		return InstallSnapshotResponse{}, fmt.Errorf("leader %q: %w", request.LeaderID, ErrUnknownMember)
+	}
+	reply := make(chan installResult, 1)
+	if err := n.submit(ctx, installSnapshotEvent{request: request, reply: reply}); err != nil {
+		return InstallSnapshotResponse{}, err
+	}
+	select {
+	case result := <-reply:
+		return result.response, result.err
+	case <-ctx.Done():
+		return InstallSnapshotResponse{}, ctx.Err()
+	case <-n.done:
+		return InstallSnapshotResponse{}, n.stoppedError()
 	}
 }
 
@@ -426,7 +483,30 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 			next = 1
 		}
 		if next <= baseIndex {
-			return // Snapshot installation is added by the next checkpoint.
+			if config.SnapshotStore == nil || appendInFlight[peer] {
+				return
+			}
+			transport, ok := config.Transport.(snapshotTransport)
+			if !ok {
+				return
+			}
+			snapshot, err := config.SnapshotStore.Load()
+			if err != nil || snapshot.LastIncludedIndex != baseIndex || snapshot.LastIncludedTerm != baseTerm {
+				return
+			}
+			request := InstallSnapshotRequest{
+				Term: term, LeaderID: config.ID, LastIncludedIndex: baseIndex,
+				LastIncludedTerm: baseTerm, State: slices.Clone(snapshot.State),
+			}
+			appendInFlight[peer] = true
+			go func() {
+				response, callErr := transport.InstallSnapshot(ctx, peer, request)
+				if callErr == nil {
+					callErr = response.Validate()
+				}
+				_ = n.submit(ctx, snapshotRPCEvent{peer: peer, requestTerm: term, response: response, err: callErr})
+			}()
+			return
 		}
 		lastIndex, _ := lastLogPositionFrom(baseIndex, baseTerm, logEntries)
 		if next > lastIndex+1 {
@@ -728,6 +808,57 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 					return applicationErr
 				}
 				event.reply <- appendResult{response: response}
+			case installSnapshotEvent:
+				if event.request.Term > state.Term {
+					if err := persistTerm(event.request.Term); err != nil {
+						persistenceErr := fmt.Errorf("persist install-snapshot term %d: %w", event.request.Term, err)
+						event.reply <- installResult{err: persistenceErr}
+						return persistenceErr
+					}
+				}
+				if event.request.Term < state.Term {
+					event.reply <- installResult{response: InstallSnapshotResponse{Term: state.Term, MatchIndex: baseIndex}}
+					continue
+				}
+				becomeFollower(event.request.LeaderID)
+				if event.request.LastIncludedIndex <= baseIndex {
+					event.reply <- installResult{response: InstallSnapshotResponse{Term: state.Term, MatchIndex: baseIndex}}
+					continue
+				}
+				if event.request.LastIncludedIndex <= state.LastApplied {
+					event.reply <- installResult{response: InstallSnapshotResponse{Term: state.Term, MatchIndex: event.request.LastIncludedIndex}}
+					continue
+				}
+				machine, machineOK := config.StateMachine.(SnapshotStateMachine)
+				compactor, compactorOK := config.LogStore.(LogCompactor)
+				if config.SnapshotStore == nil || !machineOK || !compactorOK {
+					installErr := errors.New("snapshot installation dependencies are not configured")
+					event.reply <- installResult{err: installErr}
+					return installErr
+				}
+				suffix := retainedSuffixForSnapshot(baseIndex, baseTerm, logEntries, event.request.LastIncludedIndex, event.request.LastIncludedTerm)
+				snapshot := Snapshot{LastIncludedIndex: event.request.LastIncludedIndex, LastIncludedTerm: event.request.LastIncludedTerm, State: slices.Clone(event.request.State)}
+				if err := config.SnapshotStore.Save(snapshot); err != nil {
+					installErr := fmt.Errorf("persist installed snapshot: %w", err)
+					event.reply <- installResult{err: installErr}
+					return installErr
+				}
+				if err := compactor.InstallSnapshot(snapshot.LastIncludedIndex, snapshot.LastIncludedTerm, suffix); err != nil {
+					installErr := fmt.Errorf("compact installed snapshot: %w", err)
+					event.reply <- installResult{err: installErr}
+					return installErr
+				}
+				if err := machine.Restore(slices.Clone(snapshot.State)); err != nil {
+					installErr := fmt.Errorf("restore installed snapshot: %w", err)
+					event.reply <- installResult{err: installErr}
+					return installErr
+				}
+				baseIndex, baseTerm, logEntries = snapshot.LastIncludedIndex, snapshot.LastIncludedTerm, suffix
+				state.SnapshotIndex, state.SnapshotTerm = baseIndex, baseTerm
+				state.LastApplied = max(state.LastApplied, baseIndex)
+				state.CommitIndex = max(state.CommitIndex, baseIndex)
+				state.LastLogIndex, state.LastLogTerm = lastLogPositionFrom(baseIndex, baseTerm, logEntries)
+				event.reply <- installResult{response: InstallSnapshotResponse{Term: state.Term, MatchIndex: baseIndex}}
 			case voteRPCEvent:
 				if event.err != nil {
 					continue
@@ -789,6 +920,24 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 					nextIndex[event.peer] = retryAt
 					sendReplication(leaderContext, event.peer, state.Term)
 				}
+			case snapshotRPCEvent:
+				if state.Role != Leader || event.requestTerm != state.Term {
+					continue
+				}
+				appendInFlight[event.peer] = false
+				if event.err == nil && event.response.Term > state.Term {
+					if err := persistTerm(event.response.Term); err != nil {
+						return fmt.Errorf("persist snapshot-response term %d: %w", event.response.Term, err)
+					}
+					becomeFollower("")
+					continue
+				}
+				if event.err != nil || event.response.Term != state.Term {
+					continue
+				}
+				matchIndex[event.peer] = max(matchIndex[event.peer], event.response.MatchIndex)
+				nextIndex[event.peer] = event.response.MatchIndex + 1
+				sendReplication(leaderContext, event.peer, state.Term)
 			case readRPCEvent:
 				if state.Role != Leader || event.requestTerm != state.Term {
 					continue
@@ -957,6 +1106,23 @@ type appendEntriesEvent struct {
 type appendResult struct {
 	response AppendEntriesResponse
 	err      error
+}
+
+type installSnapshotEvent struct {
+	request InstallSnapshotRequest
+	reply   chan<- installResult
+}
+
+type installResult struct {
+	response InstallSnapshotResponse
+	err      error
+}
+
+type snapshotRPCEvent struct {
+	peer        NodeID
+	requestTerm Term
+	response    InstallSnapshotResponse
+	err         error
 }
 
 type voteRPCEvent struct {

@@ -32,7 +32,34 @@ func (h *HTTPHandler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+RequestVotePath, h.requestVote)
 	mux.HandleFunc("POST "+AppendEntriesPath, h.appendEntries)
+	mux.HandleFunc("POST "+InstallSnapshotPath, h.installSnapshot)
 	return mux
+}
+
+func (h *HTTPHandler) installSnapshot(response http.ResponseWriter, request *http.Request) {
+	var message raft.InstallSnapshotRequest
+	if !h.decodeRequest(response, request, &message) {
+		return
+	}
+	if err := message.Validate(); err != nil {
+		writeRPCError(response, http.StatusBadRequest, fmt.Sprintf("invalid install snapshot request: %v", err))
+		return
+	}
+	handler, ok := h.handler.(snapshotHandler)
+	if !ok {
+		writeRPCError(response, http.StatusNotImplemented, "install snapshot handler is unavailable")
+		return
+	}
+	result, err := handler.HandleInstallSnapshot(request.Context(), message)
+	if err != nil {
+		writeRPCError(response, http.StatusInternalServerError, "install snapshot handler failed")
+		return
+	}
+	if err := result.Validate(); err != nil {
+		writeRPCError(response, http.StatusInternalServerError, "install snapshot handler returned an invalid response")
+		return
+	}
+	writeRPCJSON(response, http.StatusOK, result)
 }
 
 func (h *HTTPHandler) requestVote(w http.ResponseWriter, request *http.Request) {

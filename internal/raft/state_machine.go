@@ -11,6 +11,7 @@ type StateMachine interface {
 type SnapshotStateMachine interface {
 	StateMachine
 	Snapshot() ([]byte, error)
+	Restore([]byte) error
 }
 
 // Snapshot is an immutable state-machine image and the Raft position it
@@ -23,6 +24,7 @@ type Snapshot struct {
 
 // SnapshotStore atomically publishes durable snapshots.
 type SnapshotStore interface {
+	Load() (Snapshot, error)
 	Save(Snapshot) error
 }
 
@@ -30,4 +32,5 @@ type SnapshotStore interface {
 // the supplied suffix.
 type LogCompactor interface {
 	Compact(LogIndex, Term, []Entry) error
+	InstallSnapshot(LogIndex, Term, []Entry) error
 }

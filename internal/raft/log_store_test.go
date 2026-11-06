@@ -111,3 +111,22 @@ func TestFileLogStorePersistsCompactionBoundary(t *testing.T) {
 		t.Fatalf("Save retained suffix: %v", err)
 	}
 }
+
+func TestFileLogStoreInstallsSnapshotBeyondLocalLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raft-log")
+	store, _ := raft.NewFileLogStore(path)
+	if err := store.Save([]raft.Entry{{Index: 1, Term: 1, Command: []byte("old")}}); err != nil {
+		t.Fatal(err)
+	}
+	suffix := []raft.Entry{{Index: 4, Term: 3, Command: []byte("retained")}}
+	if err := store.InstallSnapshot(3, 2, suffix); err != nil {
+		t.Fatal(err)
+	}
+	reopened, _ := raft.NewFileLogStore(path)
+	if got, err := reopened.Load(); err != nil || !reflect.DeepEqual(got, suffix) {
+		t.Fatalf("Load = %+v, %v; want %+v", got, err, suffix)
+	}
+	if index, term := reopened.Base(); index != 3 || term != 2 {
+		t.Fatalf("Base = (%d, %d), want (3, 2)", index, term)
+	}
+}

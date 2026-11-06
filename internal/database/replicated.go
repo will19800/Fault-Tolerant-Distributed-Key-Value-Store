@@ -85,6 +85,53 @@ func (s *ReplicatedStateMachine) Snapshot() ([]byte, error) {
 	return output.Bytes(), nil
 }
 
+// Restore replaces the state machine with a previously encoded snapshot.
+func (s *ReplicatedStateMachine) Restore(data []byte) error {
+	reader := bytes.NewReader(data)
+	version, err := reader.ReadByte()
+	if err != nil {
+		return fmt.Errorf("read snapshot version: %w", err)
+	}
+	if version != stateSnapshotVersion {
+		return fmt.Errorf("unsupported state snapshot version %d", version)
+	}
+	var count uint32
+	if err := binary.Read(reader, binary.BigEndian, &count); err != nil {
+		return fmt.Errorf("read snapshot entry count: %w", err)
+	}
+	state := make(map[string][]byte, count)
+	for position := uint32(0); position < count; position++ {
+		var keyLength, valueLength uint32
+		if err := binary.Read(reader, binary.BigEndian, &keyLength); err != nil {
+			return fmt.Errorf("read snapshot entry %d key length: %w", position, err)
+		}
+		if err := binary.Read(reader, binary.BigEndian, &valueLength); err != nil {
+			return fmt.Errorf("read snapshot entry %d value length: %w", position, err)
+		}
+		if uint64(keyLength)+uint64(valueLength) > uint64(reader.Len()) || keyLength == 0 {
+			return fmt.Errorf("snapshot entry %d has invalid lengths", position)
+		}
+		keyBytes := make([]byte, keyLength)
+		value := make([]byte, valueLength)
+		if _, err := io.ReadFull(reader, keyBytes); err != nil {
+			return fmt.Errorf("read snapshot entry %d key: %w", position, err)
+		}
+		if _, err := io.ReadFull(reader, value); err != nil {
+			return fmt.Errorf("read snapshot entry %d value: %w", position, err)
+		}
+		key := string(keyBytes)
+		if _, exists := state[key]; exists {
+			return fmt.Errorf("snapshot contains duplicate key %q", key)
+		}
+		state[key] = value
+	}
+	if reader.Len() != 0 {
+		return errors.New("snapshot contains trailing data")
+	}
+	s.state.Restore(state)
+	return nil
+}
+
 // ReplicatedStore translates API mutations into Raft commands and serves
 // reads from the applied state machine.
 type ReplicatedStore struct {

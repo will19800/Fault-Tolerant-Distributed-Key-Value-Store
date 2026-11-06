@@ -76,3 +76,14 @@ func (s *MemoryStore) Snapshot() map[string][]byte {
 	}
 	return state
 }
+
+// Restore atomically replaces the complete in-memory state with a deep copy.
+func (s *MemoryStore) Restore(state map[string][]byte) {
+	replacement := make(map[string][]byte, len(state))
+	for key, value := range state {
+		replacement[key] = slices.Clone(value)
+	}
+	s.mu.Lock()
+	s.data = replacement
+	s.mu.Unlock()
+}

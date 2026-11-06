@@ -17,3 +17,7 @@ type Handler interface {
 	HandleRequestVote(context.Context, raft.RequestVoteRequest) (raft.RequestVoteResponse, error)
 	HandleAppendEntries(context.Context, raft.AppendEntriesRequest) (raft.AppendEntriesResponse, error)
 }
+
+type snapshotHandler interface {
+	HandleInstallSnapshot(context.Context, raft.InstallSnapshotRequest) (raft.InstallSnapshotResponse, error)
+}

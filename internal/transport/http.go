@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	RequestVotePath          = "/raft/request-vote"
-	AppendEntriesPath        = "/raft/append-entries"
-	DefaultMaxRPCBytes int64 = 4 << 20 // 4 MiB
+	RequestVotePath           = "/raft/request-vote"
+	AppendEntriesPath         = "/raft/append-entries"
+	InstallSnapshotPath       = "/raft/install-snapshot"
+	DefaultMaxRPCBytes  int64 = 4 << 20 // 4 MiB
 )
 
 var (
@@ -83,6 +84,20 @@ func (t *HTTPTransport) AppendEntries(ctx context.Context, target raft.NodeID, r
 	}
 	if err := response.Validate(); err != nil {
 		return raft.AppendEntriesResponse{}, fmt.Errorf("%w from %q: %v", ErrInvalidResponse, target, err)
+	}
+	return response, nil
+}
+
+func (t *HTTPTransport) InstallSnapshot(ctx context.Context, target raft.NodeID, request raft.InstallSnapshotRequest) (raft.InstallSnapshotResponse, error) {
+	if err := request.Validate(); err != nil {
+		return raft.InstallSnapshotResponse{}, fmt.Errorf("install snapshot request: %w", err)
+	}
+	var response raft.InstallSnapshotResponse
+	if err := t.call(ctx, target, InstallSnapshotPath, request, &response); err != nil {
+		return raft.InstallSnapshotResponse{}, err
+	}
+	if err := response.Validate(); err != nil {
+		return raft.InstallSnapshotResponse{}, fmt.Errorf("%w from %q: %v", ErrInvalidResponse, target, err)
 	}
 	return response, nil
 }

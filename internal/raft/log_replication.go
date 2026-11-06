@@ -107,6 +107,14 @@ func logEntriesFrom(baseIndex LogIndex, entries []Entry, index LogIndex) []Entry
 	return cloneEntries(entries[position:])
 }
 
+func retainedSuffixForSnapshot(baseIndex LogIndex, baseTerm Term, entries []Entry, snapshotIndex LogIndex, snapshotTerm Term) []Entry {
+	term, ok := logTermAt(baseIndex, baseTerm, entries, snapshotIndex)
+	if !ok || term != snapshotTerm {
+		return nil
+	}
+	return logEntriesFrom(baseIndex, entries, snapshotIndex+1)
+}
+
 func cloneEntries(entries []Entry) []Entry {
 	cloned := slices.Clone(entries)
 	for index := range cloned {

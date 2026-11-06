@@ -399,6 +399,16 @@ func (s *memoryStateMachine) Snapshot() ([]byte, error) {
 	return snapshot, nil
 }
 
+func (s *memoryStateMachine) Restore(snapshot []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commands = nil
+	if len(snapshot) > 0 {
+		s.commands = [][]byte{append([]byte(nil), snapshot...)}
+	}
+	return nil
+}
+
 func (s *memoryStateMachine) Commands() [][]byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -437,6 +447,18 @@ func (s *memoryLogStore) Base() (raft.LogIndex, raft.Term) {
 }
 
 func (s *memoryLogStore) Compact(index raft.LogIndex, term raft.Term, entries []raft.Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.compactErr != nil {
+		return s.compactErr
+	}
+	s.baseIndex, s.baseTerm = index, term
+	s.entries = cloneTestEntries(entries)
+	s.compactions++
+	return nil
+}
+
+func (s *memoryLogStore) InstallSnapshot(index raft.LogIndex, term raft.Term, entries []raft.Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.compactErr != nil {

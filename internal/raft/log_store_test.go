@@ -79,3 +79,35 @@ func TestFileLogStoreRejectsInvalidLog(t *testing.T) {
 		t.Fatal("NewFileLogStore accepted empty path")
 	}
 }
+
+func TestFileLogStorePersistsCompactionBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "raft-log")
+	store, err := raft.NewFileLogStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []raft.Entry{
+		{Index: 1, Term: 1, Command: []byte("one")},
+		{Index: 2, Term: 1, Command: []byte("two")},
+		{Index: 3, Term: 2, Command: []byte("three")},
+	}
+	if err := store.Save(entries); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Compact(2, 1, entries[2:]); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, _ := raft.NewFileLogStore(path)
+	retained, err := reopened.Load()
+	if err != nil || !reflect.DeepEqual(retained, entries[2:]) {
+		t.Fatalf("Load = %+v, %v; want %+v", retained, err, entries[2:])
+	}
+	if index, term := reopened.Base(); index != 2 || term != 1 {
+		t.Fatalf("Base = (%d, %d), want (2, 1)", index, term)
+	}
+	retained = append(retained, raft.Entry{Index: 4, Term: 2, Command: []byte("four")})
+	if err := reopened.Save(retained); err != nil {
+		t.Fatalf("Save retained suffix: %v", err)
+	}
+}

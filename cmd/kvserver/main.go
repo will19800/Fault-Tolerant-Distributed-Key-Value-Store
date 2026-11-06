@@ -21,6 +21,7 @@ import (
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/config"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/database"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/raft"
+	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/snapshot"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/transport"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/wal"
 )
@@ -93,6 +94,10 @@ func runCluster(ctx context.Context, cfg config.Server, output io.Writer) (runEr
 	if err != nil {
 		return err
 	}
+	snapshotStore, err := snapshot.NewFileStore(filepath.Join(cfg.DataDirectory, "state.snapshot"))
+	if err != nil {
+		return err
+	}
 	peerTransport, err := transport.NewHTTPTransport(cfg.Peers, cfg.RPCTimeout)
 	if err != nil {
 		return fmt.Errorf("create peer transport: %w", err)
@@ -106,7 +111,7 @@ func runCluster(ctx context.Context, cfg config.Server, output io.Writer) (runEr
 	node, err := raft.NewNode(raft.NodeConfig{
 		ID: cfg.NodeID, Members: members, Transport: peerTransport,
 		ElectionTimeout: cfg.ElectionTimeout, HeartbeatInterval: cfg.HeartbeatInterval,
-		Persistence: hardState, LogStore: logStore, StateMachine: stateMachine,
+		Persistence: hardState, LogStore: logStore, StateMachine: stateMachine, SnapshotStore: snapshotStore,
 	})
 	if err != nil {
 		return fmt.Errorf("create Raft node: %w", err)

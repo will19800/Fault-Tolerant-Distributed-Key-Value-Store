@@ -64,3 +64,15 @@ func (s *MemoryStore) Delete(key string) error {
 	delete(s.data, key)
 	return nil
 }
+
+// Snapshot returns a deep copy of every stored key and value.
+func (s *MemoryStore) Snapshot() map[string][]byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	state := make(map[string][]byte, len(s.data))
+	for key, value := range s.data {
+		state[key] = slices.Clone(value)
+	}
+	return state
+}

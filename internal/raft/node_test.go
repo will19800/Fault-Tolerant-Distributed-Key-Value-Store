@@ -358,11 +358,15 @@ func (s *memoryHardStateStore) State() raft.HardState {
 }
 
 type memoryLogStore struct {
-	mu      sync.Mutex
-	entries []raft.Entry
-	loadErr error
-	saveErr error
-	saves   int
+	mu          sync.Mutex
+	entries     []raft.Entry
+	baseIndex   raft.LogIndex
+	baseTerm    raft.Term
+	loadErr     error
+	saveErr     error
+	compactErr  error
+	saves       int
+	compactions int
 }
 
 type memoryStateMachine struct {
@@ -383,6 +387,16 @@ func (s *memoryStateMachine) Apply(command []byte) error {
 	}
 	s.commands = append(s.commands, append([]byte(nil), command...))
 	return nil
+}
+
+func (s *memoryStateMachine) Snapshot() ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var snapshot []byte
+	for _, command := range s.commands {
+		snapshot = append(snapshot, command...)
+	}
+	return snapshot, nil
 }
 
 func (s *memoryStateMachine) Commands() [][]byte {
@@ -413,6 +427,24 @@ func (s *memoryLogStore) Save(entries []raft.Entry) error {
 	}
 	s.entries = cloneTestEntries(entries)
 	s.saves++
+	return nil
+}
+
+func (s *memoryLogStore) Base() (raft.LogIndex, raft.Term) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.baseIndex, s.baseTerm
+}
+
+func (s *memoryLogStore) Compact(index raft.LogIndex, term raft.Term, entries []raft.Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.compactErr != nil {
+		return s.compactErr
+	}
+	s.baseIndex, s.baseTerm = index, term
+	s.entries = cloneTestEntries(entries)
+	s.compactions++
 	return nil
 }
 

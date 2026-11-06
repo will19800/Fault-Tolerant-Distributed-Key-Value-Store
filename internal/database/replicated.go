@@ -3,14 +3,18 @@ package database
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/raft"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/storage"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/wal"
 )
+
+const stateSnapshotVersion uint8 = 1
 
 // Consensus is the Raft behavior required by ReplicatedStore.
 type Consensus interface {
@@ -48,6 +52,37 @@ func (s *ReplicatedStateMachine) Apply(command []byte) error {
 // Get returns a value from the applied state.
 func (s *ReplicatedStateMachine) Get(key string) ([]byte, error) {
 	return s.state.Get(key)
+}
+
+// Snapshot deterministically encodes the complete applied key-value state.
+func (s *ReplicatedStateMachine) Snapshot() ([]byte, error) {
+	state := s.state.Snapshot()
+	keys := make([]string, 0, len(state))
+	for key := range state {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var output bytes.Buffer
+	output.WriteByte(stateSnapshotVersion)
+	if err := binary.Write(&output, binary.BigEndian, uint32(len(keys))); err != nil {
+		return nil, err
+	}
+	for _, key := range keys {
+		value := state[key]
+		if len(key) > int(^uint32(0)) || len(value) > int(^uint32(0)) {
+			return nil, errors.New("snapshot key or value exceeds 4 GiB")
+		}
+		if err := binary.Write(&output, binary.BigEndian, uint32(len(key))); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(&output, binary.BigEndian, uint32(len(value))); err != nil {
+			return nil, err
+		}
+		output.WriteString(key)
+		output.Write(value)
+	}
+	return output.Bytes(), nil
 }
 
 // ReplicatedStore translates API mutations into Raft commands and serves

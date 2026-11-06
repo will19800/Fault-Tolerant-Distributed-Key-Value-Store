@@ -68,6 +68,7 @@ type NodeConfig struct {
 	Persistence            HardStateStore
 	LogStore               LogStore
 	StateMachine           StateMachine
+	SnapshotStore          SnapshotStore
 }
 
 // Node serializes timers, RPCs, and state queries through one event loop.
@@ -100,8 +101,16 @@ func NewNode(config NodeConfig) (*Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load Raft log: %w", err)
 	}
-	if err := validateLog(logEntries); err != nil {
+	var baseIndex LogIndex
+	var baseTerm Term
+	if store, ok := config.LogStore.(interface{ Base() (LogIndex, Term) }); ok {
+		baseIndex, baseTerm = store.Base()
+	}
+	if err := validateLogFrom(baseIndex, baseTerm, logEntries); err != nil {
 		return nil, fmt.Errorf("validate Raft log: %w", err)
+	}
+	if baseIndex > 0 {
+		return nil, fmt.Errorf("recover compacted Raft log at index %d: snapshot restoration is not implemented", baseIndex)
 	}
 	logEntries = cloneEntries(logEntries)
 	electionTimer := config.Clock.NewTimer(nextElectionTimeout(config))
@@ -119,10 +128,27 @@ func NewNode(config NodeConfig) (*Node, error) {
 		node.members[member] = struct{}{}
 	}
 	go func() {
-		node.runErr = node.run(config, electionTimer, hardState, logEntries)
+		node.runErr = node.run(config, electionTimer, hardState, baseIndex, baseTerm, logEntries)
 		close(node.done)
 	}()
 	return node, nil
+}
+
+// TakeSnapshot atomically saves the applied state and then compacts the
+// covered log prefix. It returns the included index.
+func (n *Node) TakeSnapshot(ctx context.Context) (LogIndex, error) {
+	reply := make(chan snapshotResult, 1)
+	if err := n.submit(ctx, snapshotEvent{reply: reply}); err != nil {
+		return 0, err
+	}
+	select {
+	case result := <-reply:
+		return result.index, result.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-n.done:
+		return 0, n.stoppedError()
+	}
 }
 
 // Status returns a consistent snapshot from the event loop.
@@ -255,7 +281,7 @@ func (n *Node) stoppedError() error {
 	return ErrNodeStopped
 }
 
-func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, logEntries []Entry) error {
+func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, baseIndex LogIndex, baseTerm Term, logEntries []Entry) error {
 	defer electionTimer.Stop()
 
 	state := Status{
@@ -264,7 +290,9 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		Term:     hardState.CurrentTerm,
 		VotedFor: hardState.VotedFor,
 	}
-	state.LastLogIndex, state.LastLogTerm = lastLogPosition(logEntries)
+	state.SnapshotIndex, state.SnapshotTerm = baseIndex, baseTerm
+	state.LastApplied, state.CommitIndex = baseIndex, baseIndex
+	state.LastLogIndex, state.LastLogTerm = lastLogPositionFrom(baseIndex, baseTerm, logEntries)
 	peers := peerIDs(config.Members, config.ID)
 	quorum := len(config.Members)/2 + 1
 	var votes map[NodeID]struct{}
@@ -354,10 +382,10 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 	applyCommitted := func() error {
 		for state.LastApplied < state.CommitIndex {
 			next := state.LastApplied + 1
-			if next > LogIndex(len(logEntries)) {
-				return fmt.Errorf("committed index %d exceeds log length %d", state.CommitIndex, len(logEntries))
+			entry, ok := logEntryAt(baseIndex, logEntries, next)
+			if !ok {
+				return fmt.Errorf("committed index %d is unavailable after snapshot index %d", next, baseIndex)
 			}
-			entry := logEntries[next-1]
 			if len(entry.Command) != 0 {
 				if err := config.StateMachine.Apply(slices.Clone(entry.Command)); err != nil {
 					return fmt.Errorf("apply committed entry %d: %w", next, err)
@@ -373,7 +401,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 	}
 
 	sendVoteRequests := func(ctx context.Context, term Term) {
-		lastIndex, lastTerm := lastLogPosition(logEntries)
+		lastIndex, lastTerm := lastLogPositionFrom(baseIndex, baseTerm, logEntries)
 		request := RequestVoteRequest{
 			Term: term, CandidateID: config.ID,
 			LastLogIndex: lastIndex, LastLogTerm: lastTerm,
@@ -397,18 +425,21 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		if next == 0 {
 			next = 1
 		}
-		lastIndex, _ := lastLogPosition(logEntries)
+		if next <= baseIndex {
+			return // Snapshot installation is added by the next checkpoint.
+		}
+		lastIndex, _ := lastLogPositionFrom(baseIndex, baseTerm, logEntries)
 		if next > lastIndex+1 {
 			next = lastIndex + 1
 		}
 		prevIndex := next - 1
 		prevTerm := Term(0)
 		if prevIndex > 0 {
-			prevTerm = logEntries[prevIndex-1].Term
+			prevTerm, _ = logTermAt(baseIndex, baseTerm, logEntries, prevIndex)
 		}
 		request := AppendEntriesRequest{
 			Term: term, LeaderID: config.ID, PrevLogIndex: prevIndex,
-			PrevLogTerm: prevTerm, Entries: cloneEntries(logEntries[next-1:]),
+			PrevLogTerm: prevTerm, Entries: logEntriesFrom(baseIndex, logEntries, next),
 			LeaderCommit: state.CommitIndex,
 		}
 		appendInFlight[peer] = true
@@ -429,7 +460,8 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		}
 	}
 	currentTermCommitted := func() bool {
-		return state.CommitIndex > 0 && logEntries[state.CommitIndex-1].Term == state.Term
+		term, ok := logTermAt(baseIndex, baseTerm, logEntries, state.CommitIndex)
+		return ok && state.CommitIndex > 0 && term == state.Term
 	}
 	completeReadRounds := func() {
 		if !currentTermCommitted() || state.LastApplied < state.CommitIndex {
@@ -445,7 +477,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		}
 	}
 	sendReadRound := func(ctx context.Context, roundID uint64, term Term) {
-		lastIndex, lastTerm := lastLogPosition(logEntries)
+		lastIndex, lastTerm := lastLogPositionFrom(baseIndex, baseTerm, logEntries)
 		request := AppendEntriesRequest{
 			Term: term, LeaderID: config.ID, PrevLogIndex: lastIndex,
 			PrevLogTerm: lastTerm, LeaderCommit: state.CommitIndex,
@@ -478,8 +510,8 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 			return fmt.Errorf("persist leader no-op entry %d: %w", noOp.Index, err)
 		}
 		logEntries = nextLog
-		state.LastLogIndex, state.LastLogTerm = lastLogPosition(logEntries)
-		lastIndex, _ := lastLogPosition(logEntries)
+		state.LastLogIndex, state.LastLogTerm = lastLogPositionFrom(baseIndex, baseTerm, logEntries)
+		lastIndex, _ := lastLogPositionFrom(baseIndex, baseTerm, logEntries)
 		for _, peer := range peers {
 			nextIndex[peer] = lastIndex + 1
 			matchIndex[peer] = 0
@@ -535,6 +567,49 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 			switch event := rawEvent.(type) {
 			case statusEvent:
 				event.reply <- state
+			case snapshotEvent:
+				if config.SnapshotStore == nil {
+					event.reply <- snapshotResult{err: errors.New("snapshot store is not configured")}
+					continue
+				}
+				machine, ok := config.StateMachine.(SnapshotStateMachine)
+				if !ok {
+					event.reply <- snapshotResult{err: errors.New("state machine does not support snapshots")}
+					continue
+				}
+				compactor, ok := config.LogStore.(LogCompactor)
+				if !ok {
+					event.reply <- snapshotResult{err: errors.New("Raft log store does not support compaction")}
+					continue
+				}
+				if state.LastApplied <= baseIndex {
+					event.reply <- snapshotResult{index: baseIndex}
+					continue
+				}
+				term, ok := logTermAt(baseIndex, baseTerm, logEntries, state.LastApplied)
+				if !ok {
+					event.reply <- snapshotResult{err: fmt.Errorf("snapshot index %d is missing from the log", state.LastApplied)}
+					continue
+				}
+				data, err := machine.Snapshot()
+				if err != nil {
+					event.reply <- snapshotResult{err: fmt.Errorf("capture state-machine snapshot: %w", err)}
+					continue
+				}
+				snapshot := Snapshot{LastIncludedIndex: state.LastApplied, LastIncludedTerm: term, State: slices.Clone(data)}
+				if err := config.SnapshotStore.Save(snapshot); err != nil {
+					event.reply <- snapshotResult{err: fmt.Errorf("persist snapshot at index %d: %w", state.LastApplied, err)}
+					continue
+				}
+				suffix := logEntriesFrom(baseIndex, logEntries, state.LastApplied+1)
+				if err := compactor.Compact(state.LastApplied, term, suffix); err != nil {
+					event.reply <- snapshotResult{err: fmt.Errorf("compact log through index %d: %w", state.LastApplied, err)}
+					continue
+				}
+				baseIndex, baseTerm = state.LastApplied, term
+				logEntries = suffix
+				state.SnapshotIndex, state.SnapshotTerm = baseIndex, baseTerm
+				event.reply <- snapshotResult{index: baseIndex}
 			case readBarrierEvent:
 				if state.Role != Leader {
 					event.reply <- readResult{err: NotLeaderError{LeaderID: state.LeaderID}}
@@ -587,7 +662,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 					return persistenceErr
 				}
 				logEntries = nextLog
-				state.LastLogIndex, state.LastLogTerm = lastLogPosition(logEntries)
+				state.LastLogIndex, state.LastLogTerm = lastLogPositionFrom(baseIndex, baseTerm, logEntries)
 				pendingProposals[entry.Index] = append(pendingProposals[entry.Index], event.reply)
 				sendAllReplication(leaderContext, state.Term)
 			case requestVoteEvent:
@@ -600,7 +675,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 					becomeFollower("")
 				}
 				grant := false
-				if event.request.Term == state.Term && candidateLogIsFresh(event.request, logEntries) &&
+				if event.request.Term == state.Term && candidateLogIsFreshFrom(event.request, baseIndex, baseTerm, logEntries) &&
 					(state.VotedFor == "" || state.VotedFor == event.request.CandidateID) {
 					if state.VotedFor == "" {
 						next := hardState
@@ -625,12 +700,12 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 				}
 				if event.request.Term < state.Term {
 					event.reply <- appendResult{response: AppendEntriesResponse{
-						Term: state.Term, ConflictIndex: LogIndex(len(logEntries)) + 1,
+						Term: state.Term, ConflictIndex: state.LastLogIndex + 1,
 					}}
 					continue
 				}
 				becomeFollower(event.request.LeaderID)
-				nextLog, response, changed := reconcileLog(logEntries, event.request)
+				nextLog, response, changed := reconcileLogFrom(baseIndex, baseTerm, logEntries, event.request)
 				response.Term = state.Term
 				if changed {
 					if err := config.LogStore.Save(nextLog); err != nil {
@@ -639,7 +714,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 						return persistenceErr
 					}
 					logEntries = nextLog
-					state.LastLogIndex, state.LastLogTerm = lastLogPosition(logEntries)
+					state.LastLogIndex, state.LastLogTerm = lastLogPositionFrom(baseIndex, baseTerm, logEntries)
 				}
 				if response.Success && event.request.LeaderCommit > state.CommitIndex {
 					commit := min(event.request.LeaderCommit, response.MatchIndex)
@@ -822,6 +897,15 @@ func peerIDs(members []NodeID, localID NodeID) []NodeID {
 
 type statusEvent struct {
 	reply chan<- Status
+}
+
+type snapshotEvent struct {
+	reply chan<- snapshotResult
+}
+
+type snapshotResult struct {
+	index LogIndex
+	err   error
 }
 
 type readBarrierEvent struct {

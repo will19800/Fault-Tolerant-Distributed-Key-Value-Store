@@ -1,0 +1,48 @@
+{
+  "metric": "replacement follower initialization to applied fixed reference index",
+  "acceptance": "p99 \u003c= 300ms",
+  "passed": true,
+  "workload": {
+    "trials": 50,
+    "keys": 1000,
+    "value_bytes": 256,
+    "retained_log_entries": 128,
+    "snapshot_bytes": 274037,
+    "retained_log_bytes": 39204,
+    "reference_index": 1128,
+    "client_load": "none during recovery",
+    "election_settings": "1h timeout; election excluded",
+    "durability": "checksummed files; fsync before atomic rename; parent directory fsync"
+  },
+  "environment": {
+    "hardware": "MacBook Air, Apple M2 8-core, 8 GB memory",
+    "os": "darwin",
+    "architecture": "arm64",
+    "go_version": "go1.26.4",
+    "cpus": 8,
+    "timestamp_method": "Go time.Now monotonic elapsed time",
+    "storage": "internal solid-state storage, APFS"
+  },
+  "results": {
+    "samples": 50,
+    "p50_ms": 0.961542,
+    "p95_ms": 1.772542,
+    "p99_ms": 1.85975,
+    "max_ms": 1.85975
+  },
+  "phase_p50_ms": {
+    "hard_state_loaded": 0.068709,
+    "log_loaded": 0.1275,
+    "node_started": 0.861917,
+    "peer_caught_up": 0.961542,
+    "process_started": 0.001209,
+    "retained_log_replayed": 0.961542,
+    "snapshot_loaded": 0.325667,
+    "state_applied": 0.961542,
+    "state_restored": 0.846125
+  },
+  "limitations": [
+    "This benchmark measures in-process follower initialization with a synthetic leader heartbeat; it excludes OS process launch and election time.",
+    "The healthy majority's first post-restart client commit and full-cluster convergence are separate metrics and are not measured here."
+  ]
+}

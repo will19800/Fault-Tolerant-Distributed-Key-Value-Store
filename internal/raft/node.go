@@ -73,6 +73,9 @@ type NodeConfig struct {
 	LogStore               LogStore
 	StateMachine           StateMachine
 	SnapshotStore          SnapshotStore
+	RecoveryStartedAt      time.Time
+	RecoveryReferenceIndex LogIndex
+	RecoveryObserver       RecoveryObserver
 }
 
 // Node serializes timers, RPCs, and state queries through one event loop.
@@ -88,6 +91,15 @@ type Node struct {
 // NewNode validates config, recovers hard state, and starts a follower event
 // loop.
 func NewNode(config NodeConfig) (*Node, error) {
+	if config.RecoveryStartedAt.IsZero() {
+		config.RecoveryStartedAt = time.Now()
+	}
+	reportRecovery := func(phase RecoveryPhase, index LogIndex) {
+		if config.RecoveryObserver != nil {
+			config.RecoveryObserver(RecoveryEvent{Phase: phase, Elapsed: time.Since(config.RecoveryStartedAt), Index: index})
+		}
+	}
+	reportRecovery(RecoveryProcessStarted, 0)
 	if err := normalizeNodeConfig(&config); err != nil {
 		return nil, err
 	}
@@ -98,6 +110,7 @@ func NewNode(config NodeConfig) (*Node, error) {
 	if err := hardState.Validate(); err != nil {
 		return nil, fmt.Errorf("validate Raft hard state: %w", err)
 	}
+	reportRecovery(RecoveryHardStateLoaded, 0)
 	if hardState.VotedFor != "" && !slices.Contains(config.Members, hardState.VotedFor) {
 		return nil, fmt.Errorf("recovered vote for %q: %w", hardState.VotedFor, ErrUnknownMember)
 	}
@@ -113,12 +126,15 @@ func NewNode(config NodeConfig) (*Node, error) {
 	if err := validateLogFrom(baseIndex, baseTerm, logEntries); err != nil {
 		return nil, fmt.Errorf("validate Raft log: %w", err)
 	}
+	lastLoadedIndex, _ := lastLogPositionFrom(baseIndex, baseTerm, logEntries)
+	reportRecovery(RecoveryLogLoaded, lastLoadedIndex)
 	var recoveredSnapshot Snapshot
 	if config.SnapshotStore != nil {
 		recovered, err := config.SnapshotStore.Load()
 		if err != nil {
 			return nil, fmt.Errorf("load snapshot: %w", err)
 		}
+		reportRecovery(RecoverySnapshotLoaded, recovered.LastIncludedIndex)
 		if recovered.LastIncludedIndex > 0 {
 			recoveredSnapshot = recovered
 			machine, ok := config.StateMachine.(SnapshotStateMachine)
@@ -142,6 +158,7 @@ func NewNode(config NodeConfig) (*Node, error) {
 			if err := machine.Restore(slices.Clone(recovered.State)); err != nil {
 				return nil, fmt.Errorf("restore state machine: %w", err)
 			}
+			reportRecovery(RecoveryStateRestored, recovered.LastIncludedIndex)
 		}
 	}
 	if baseIndex > 0 && recoveredSnapshot.LastIncludedIndex == 0 {
@@ -166,6 +183,7 @@ func NewNode(config NodeConfig) (*Node, error) {
 		node.runErr = node.run(config, electionTimer, hardState, baseIndex, baseTerm, logEntries)
 		close(node.done)
 	}()
+	reportRecovery(RecoveryNodeStarted, baseIndex)
 	return node, nil
 }
 
@@ -364,6 +382,8 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 	pendingProposals := make(map[LogIndex][]chan<- proposalResult)
 	readRounds := make(map[uint64]*readRound)
 	var nextReadRound uint64
+	recoveryCaughtUp := false
+	firstCommitReported := false
 
 	cancelElection := func() {
 		if electionCancel != nil {
@@ -449,6 +469,17 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 				}
 			}
 			state.LastApplied = next
+			if config.RecoveryObserver != nil && config.RecoveryReferenceIndex > 0 && state.LastApplied >= config.RecoveryReferenceIndex && !recoveryCaughtUp {
+				elapsed := time.Since(config.RecoveryStartedAt)
+				config.RecoveryObserver(RecoveryEvent{Phase: RecoveryStateApplied, Elapsed: elapsed, Index: state.LastApplied})
+				config.RecoveryObserver(RecoveryEvent{Phase: RecoveryLogReplayed, Elapsed: elapsed, Index: state.LastApplied})
+				config.RecoveryObserver(RecoveryEvent{Phase: RecoveryPeerCaughtUp, Elapsed: elapsed, Index: state.LastApplied})
+				recoveryCaughtUp = true
+			}
+			if !firstCommitReported && len(pendingProposals[next]) > 0 && config.RecoveryObserver != nil {
+				config.RecoveryObserver(RecoveryEvent{Phase: RecoveryFirstCommit, Elapsed: time.Since(config.RecoveryStartedAt), Index: next})
+				firstCommitReported = true
+			}
 			for _, reply := range pendingProposals[next] {
 				reply <- proposalResult{index: next}
 			}

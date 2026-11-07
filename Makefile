@@ -1,4 +1,4 @@
-.PHONY: build test test-race vet fmt check cluster-3 cluster-5
+.PHONY: build test test-race vet fmt check cluster-3 cluster-5 recovery-bench
 
 build:
 	go build ./...
@@ -22,3 +22,6 @@ cluster-3:
 
 cluster-5:
 	./scripts/run-local-cluster.sh 5
+
+recovery-bench:
+	go run ./cmd/kvrecoverybench

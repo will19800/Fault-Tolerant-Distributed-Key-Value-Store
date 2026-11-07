@@ -83,6 +83,8 @@ func runStandalone(ctx context.Context, cfg config.Server, output io.Writer) (ru
 }
 
 func runCluster(ctx context.Context, cfg config.Server, output io.Writer) (runErr error) {
+	recoveryStarted := time.Now()
+	logger := newLogger(output)
 	if err := os.MkdirAll(cfg.DataDirectory, 0o700); err != nil {
 		return fmt.Errorf("create data directory %q: %w", cfg.DataDirectory, err)
 	}
@@ -112,6 +114,10 @@ func runCluster(ctx context.Context, cfg config.Server, output io.Writer) (runEr
 		ID: cfg.NodeID, Members: members, Transport: peerTransport,
 		ElectionTimeout: cfg.ElectionTimeout, HeartbeatInterval: cfg.HeartbeatInterval,
 		Persistence: hardState, LogStore: logStore, StateMachine: stateMachine, SnapshotStore: snapshotStore,
+		RecoveryStartedAt: recoveryStarted,
+		RecoveryObserver: func(event raft.RecoveryEvent) {
+			logger.Info("Raft recovery phase", "phase", event.Phase, "elapsed", event.Elapsed, "index", event.Index)
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("create Raft node: %w", err)
@@ -141,7 +147,6 @@ func runCluster(ctx context.Context, cfg config.Server, output io.Writer) (runEr
 	}
 	clientServer := &http.Server{Handler: clientHandler.Routes(), ReadHeaderTimeout: readHeaderTimeout}
 	peerServer := &http.Server{Handler: peerHandler.Routes(), ReadHeaderTimeout: readHeaderTimeout}
-	logger := newLogger(output)
 	logger.Info("cluster node starting", "node_id", cfg.NodeID, "client_address", cfg.Address, "peer_address", cfg.PeerAddress)
 	serveCtx, cancelServe := context.WithCancel(ctx)
 	nodeStopped := make(chan error, 1)

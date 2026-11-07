@@ -10,6 +10,7 @@ The target capabilities in this README and the design document are project goals
 cmd/
   kvserver/          Server process
   kvctl/             Command-line client
+  kvrecoverybench/   Repeatable follower recovery benchmark
 internal/
   api/               Client-facing request handling
   config/            Node and cluster configuration
@@ -36,6 +37,7 @@ make test
 make test-race
 make vet
 make check
+make recovery-bench
 ```
 
 ## Run the single-node server

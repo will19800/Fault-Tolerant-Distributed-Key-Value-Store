@@ -15,6 +15,7 @@ internal/
   api/               Client-facing request handling
   config/            Node and cluster configuration
   database/          Durable single-node database composition
+  failure/           Configurable network and process fault injection
   raft/              Consensus state and algorithms
   snapshot/          State snapshots and restoration
   storage/           Deterministic key-value state machine

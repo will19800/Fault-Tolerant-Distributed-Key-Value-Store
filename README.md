@@ -16,6 +16,7 @@ internal/
   config/            Node and cluster configuration
   database/          Durable single-node database composition
   failure/           Configurable network and process fault injection
+  oracle/            Independent correctness checks and failure traces
   raft/              Consensus state and algorithms
   snapshot/          State snapshots and restoration
   storage/           Deterministic key-value state machine

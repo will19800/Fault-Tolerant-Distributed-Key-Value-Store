@@ -46,6 +46,34 @@ their offsets and distinguishes abrupt `Crash`, graceful `GracefulStop`, and
 `Restart` hooks supplied by the scenario harness. Both delayed messages and
 scheduled actions honor context cancellation.
 
-The next checkpoints add correctness traces and the catalog of 50 distinct
-scenarios. Each catalog entry will state its purpose, fault schedule, workload,
-expected behavior, assertions, and reproduction command.
+The `internal/oracle` package records client operations independently from the
+cluster. Record each request with `Issue` before sending it, then call
+`Acknowledge` after a successful response or `Timeout` when the client context
+expires. Timed-out writes remain ambiguous and are retained in the trace.
+
+After faults heal, give the oracle a consistent observation from every replica:
+
+```go
+err = correctness.ObserveReplica(oracle.ReplicaObservation{
+    Node:        nodeID,
+    BaseIndex:   snapshotIndex,
+    BaseTerm:    snapshotTerm,
+    CommitIndex: status.CommitIndex,
+    Entries:     retainedLog,
+    State:       appliedState,
+})
+```
+
+`CheckCommittedPrefix` compares every committed index visible on two replicas.
+It also compares snapshot boundary terms when one replica has compacted the
+corresponding command. `CheckConvergence` compares the complete applied
+key-value state after the workload stops. `Check` runs both properties.
+
+On failure, `WriteTrace` atomically writes deterministic JSON containing the
+scenario name, seed, logical event order, client outcomes, committed evidence,
+replica state, and violation. The same scenario and seed can then reproduce the
+run without depending on wall-clock timestamps in the artifact.
+
+The next checkpoint adds the catalog of 50 distinct scenarios. Each catalog
+entry will state its purpose, fault schedule, workload, expected behavior,
+assertions, and reproduction command.

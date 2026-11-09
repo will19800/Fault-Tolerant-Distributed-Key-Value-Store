@@ -74,6 +74,21 @@ scenario name, seed, logical event order, client outcomes, committed evidence,
 replica state, and violation. The same scenario and seed can then reproduce the
 run without depending on wall-clock timestamps in the artifact.
 
-The next checkpoint adds the catalog of 50 distinct scenarios. Each catalog
-entry will state its purpose, fault schedule, workload, expected behavior,
-assertions, and reproduction command.
+The machine-readable catalog in `internal/scenario` defines 52 distinct cases:
+8 election, 8 replication, 7 quorum-loss, 7 healing, 8 restart, 7 snapshot and
+compaction, and 7 combined-failure scenarios. Every definition includes its
+purpose, topology, seed, concrete fault controls, workload, expected behavior,
+oracle assertions, and selection command. [`catalog.md`](catalog.md) is the
+readable index.
+
+Run the complete declaration suite with:
+
+```sh
+go test ./test/failure -run TestAdversarialScenarios -count=1
+```
+
+Each row in the catalog provides a command that selects its exact ID and seed.
+This suite validates and serializes the declarations and initializes their
+failure injectors. A declaration pass is not a successful distributed failure
+trial; coordinated cluster outcomes and oracle traces must be reported
+separately as evidence.

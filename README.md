@@ -18,6 +18,7 @@ internal/
   failure/           Configurable network and process fault injection
   oracle/            Independent correctness checks and failure traces
   raft/              Consensus state and algorithms
+  scenario/          Validated adversarial scenario catalog
   snapshot/          State snapshots and restoration
   storage/           Deterministic key-value state machine
   transport/         Node-to-node Raft communication

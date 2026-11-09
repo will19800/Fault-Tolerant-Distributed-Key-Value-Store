@@ -76,6 +76,7 @@ type NodeConfig struct {
 	RecoveryStartedAt      time.Time
 	RecoveryReferenceIndex LogIndex
 	RecoveryObserver       RecoveryObserver
+	Observer               Observer
 }
 
 // Node serializes timers, RPCs, and state queries through one event loop.
@@ -384,6 +385,11 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 	var nextReadRound uint64
 	recoveryCaughtUp := false
 	firstCommitReported := false
+	emit := func(kind EventKind, peer NodeID, index LogIndex) {
+		if config.Observer != nil {
+			config.Observer(Event{Kind: kind, Node: state.ID, Peer: peer, Role: state.Role, Term: state.Term, LeaderID: state.LeaderID, Index: index})
+		}
+	}
 
 	cancelElection := func() {
 		if electionCancel != nil {
@@ -441,6 +447,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		}
 	}
 	becomeFollower := func(leader NodeID) {
+		previousRole, previousLeader := state.Role, state.LeaderID
 		if state.Role == Leader {
 			notLeader := NotLeaderError{LeaderID: leader}
 			failPendingProposals(notLeader)
@@ -455,6 +462,9 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		clear(matchIndex)
 		clear(appendInFlight)
 		resetElectionTimer()
+		if previousRole != Follower || previousLeader != leader {
+			emit(EventBecameFollower, "", state.CommitIndex)
+		}
 	}
 	applyCommitted := func() error {
 		for state.LastApplied < state.CommitIndex {
@@ -469,6 +479,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 				}
 			}
 			state.LastApplied = next
+			emit(EventApplied, "", next)
 			if config.RecoveryObserver != nil && config.RecoveryReferenceIndex > 0 && state.LastApplied >= config.RecoveryReferenceIndex && !recoveryCaughtUp {
 				elapsed := time.Since(config.RecoveryStartedAt)
 				config.RecoveryObserver(RecoveryEvent{Phase: RecoveryStateApplied, Elapsed: elapsed, Index: state.LastApplied})
@@ -610,6 +621,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		cancelElection()
 		state.Role = Leader
 		state.LeaderID = config.ID
+		emit(EventBecameLeader, "", state.CommitIndex)
 		electionTimer.Stop()
 		leaderContext, leaderCancel = context.WithCancel(context.Background())
 		if state.LastLogIndex == ^LogIndex(0) {
@@ -652,6 +664,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 		}
 		state.Role = Candidate
 		state.LeaderID = ""
+		emit(EventElectionStarted, "", state.LastLogIndex)
 		votes = map[NodeID]struct{}{config.ID: {}}
 		resetElectionTimer()
 		electionContext, cancel := context.WithCancel(context.Background())
@@ -678,6 +691,19 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 			switch event := rawEvent.(type) {
 			case statusEvent:
 				event.reply <- state
+			case metricsEvent:
+				metrics := Metrics{
+					NodeID: state.ID, Role: state.Role.String(), Term: state.Term, LeaderID: state.LeaderID,
+					CommitIndex: state.CommitIndex, LastApplied: state.LastApplied, LastLogIndex: state.LastLogIndex,
+					SnapshotIndex: state.SnapshotIndex, ApplyLag: state.CommitIndex - state.LastApplied,
+				}
+				if state.Role == Leader {
+					for _, peer := range peers {
+						lag := state.LastLogIndex - min(state.LastLogIndex, matchIndex[peer])
+						metrics.PeerReplication = append(metrics.PeerReplication, PeerProgress{Node: peer, MatchIndex: matchIndex[peer], Lag: lag})
+					}
+				}
+				event.reply <- metrics
 			case snapshotEvent:
 				if config.SnapshotStore == nil {
 					event.reply <- snapshotResult{err: errors.New("snapshot store is not configured")}
@@ -720,6 +746,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 				baseIndex, baseTerm = state.LastApplied, term
 				logEntries = suffix
 				state.SnapshotIndex, state.SnapshotTerm = baseIndex, baseTerm
+				emit(EventSnapshotCreated, "", baseIndex)
 				event.reply <- snapshotResult{index: baseIndex}
 			case readBarrierEvent:
 				if state.Role != Leader {
@@ -831,6 +858,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 					commit := min(event.request.LeaderCommit, response.MatchIndex)
 					if commit > state.CommitIndex {
 						state.CommitIndex = commit
+						emit(EventCommitAdvanced, "", commit)
 					}
 				}
 				if err := applyCommitted(); err != nil {
@@ -889,6 +917,7 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 				state.LastApplied = max(state.LastApplied, baseIndex)
 				state.CommitIndex = max(state.CommitIndex, baseIndex)
 				state.LastLogIndex, state.LastLogTerm = lastLogPositionFrom(baseIndex, baseTerm, logEntries)
+				emit(EventSnapshotInstalled, event.request.LeaderID, baseIndex)
 				event.reply <- installResult{response: InstallSnapshotResponse{Term: state.Term, MatchIndex: baseIndex}}
 			case voteRPCEvent:
 				if event.err != nil {
@@ -929,10 +958,12 @@ func (n *Node) run(config NodeConfig, electionTimer Timer, hardState HardState, 
 					if event.response.MatchIndex > matchIndex[event.peer] {
 						matchIndex[event.peer] = event.response.MatchIndex
 						nextIndex[event.peer] = event.response.MatchIndex + 1
+						emit(EventReplicationProgress, event.peer, event.response.MatchIndex)
 					}
 					previousCommit := state.CommitIndex
 					state.CommitIndex = committedIndex(logEntries, matchIndex, quorum, state.Term, state.CommitIndex)
 					if state.CommitIndex > previousCommit {
+						emit(EventCommitAdvanced, "", state.CommitIndex)
 						if err := applyCommitted(); err != nil {
 							return fmt.Errorf("apply leader commit through %d: %w", state.CommitIndex, err)
 						}

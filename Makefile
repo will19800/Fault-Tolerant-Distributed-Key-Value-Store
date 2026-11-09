@@ -1,4 +1,4 @@
-.PHONY: build test test-race vet fmt check cluster-3 cluster-5 recovery-bench
+.PHONY: build test test-race vet fmt check cluster-3 cluster-5 recovery-bench cluster-bench
 
 build:
 	go build ./...
@@ -25,3 +25,6 @@ cluster-5:
 
 recovery-bench:
 	go run ./cmd/kvrecoverybench
+
+cluster-bench:
+	KV_BENCHMARK=1 KV_BENCHMARK_OUTPUT=../../benchmarks/cluster-local.json go test ./cmd/kvserver -run TestClusterBenchmark -count=1 -timeout=60s -v

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
+	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/observability"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/raft"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/storage"
 )
@@ -36,6 +38,14 @@ type contextStore interface {
 type Handler struct {
 	store         Store
 	maxValueBytes int64
+	metrics       *observability.Recorder
+	raftMetrics   observability.RaftSource
+}
+
+// EnableObservability exposes process request metrics and optional Raft state.
+// Call it before Routes.
+func (h *Handler) EnableObservability(metrics *observability.Recorder, raftMetrics observability.RaftSource) {
+	h.metrics, h.raftMetrics = metrics, raftMetrics
 }
 
 // NewHandler constructs an HTTP handler for store.
@@ -60,7 +70,59 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/keys/{key}", h.get)
 	mux.HandleFunc("DELETE /v1/keys/{key}", h.delete)
 	mux.HandleFunc("GET /healthz", h.health)
+	if h.metrics != nil {
+		mux.HandleFunc("GET /metrics", h.serveMetrics)
+		return h.observeRequests(mux)
+	}
 	return mux
+}
+
+func (h *Handler) observeRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		started := time.Now()
+		status := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(status, r)
+		h.metrics.ObserveRequest(requestOperation(r), status.status, time.Since(started))
+	})
+}
+
+func (h *Handler) serveMetrics(w http.ResponseWriter, r *http.Request) {
+	report, err := h.metrics.Snapshot(r.Context(), h.raftMetrics)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "metrics_unavailable", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func requestOperation(r *http.Request) string {
+	if r.URL.Path == "/healthz" {
+		return "health"
+	}
+	switch r.Method {
+	case http.MethodPut:
+		return "put"
+	case http.MethodGet:
+		return "get"
+	case http.MethodDelete:
+		return "delete"
+	default:
+		return "other"
+	}
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
 }
 
 func (h *Handler) put(w http.ResponseWriter, r *http.Request) {

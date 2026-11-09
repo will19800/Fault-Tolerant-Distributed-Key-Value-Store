@@ -1,6 +1,8 @@
 # Fault-Tolerant Distributed Key-Value Store
 
-A learning-focused distributed key-value store in Go. The project will grow from an in-memory single-server store into a five-node Raft cluster with durable logs, snapshots, and reproducible failure testing.
+A learning-focused distributed key-value store in Go with standalone durable
+storage, three- or five-node Raft clusters, snapshots, observability, and
+reproducible failure-test components.
 
 The target capabilities in this README and the design document are project goals until supported by implementation and test evidence.
 
@@ -16,6 +18,7 @@ internal/
   config/            Node and cluster configuration
   database/          Durable single-node database composition
   failure/           Configurable network and process fault injection
+  observability/     Request metrics and Raft metric reports
   oracle/            Independent correctness checks and failure traces
   raft/              Consensus state and algorithms
   scenario/          Validated adversarial scenario catalog
@@ -41,6 +44,7 @@ make test-race
 make vet
 make check
 make recovery-bench
+make cluster-bench
 ```
 
 ## Run the single-node server
@@ -102,3 +106,20 @@ Client endpoints use ports `8001` through `8003` for three nodes and through
 Send requests to the elected leader. A follower responds with `not_leader`
 and its known Raft node ID; use the printed node-to-URL list to select that
 node's client endpoint.
+
+Each server exposes structured JSON logs and `GET /metrics`. Cluster metrics
+include role, term, leader, commit and applied indexes, snapshot index, apply
+lag, and leader-side peer replication lag. See the [observability guide](docs/observability.md).
+
+## Documentation and evidence
+
+- [Architecture walkthrough](docs/architecture.md)
+- [Demonstration guide](docs/demo.md)
+- [Benchmark methods and results](benchmarks/README.md)
+- [Evidence for each target claim](docs/evidence.md)
+- [Limitations and future work](docs/limitations.md)
+- [Adversarial scenario catalog](test/failure/catalog.md)
+
+The evidence report is authoritative about which target claims are supported.
+In particular, validated scenario declarations are not counted as completed
+distributed trials.

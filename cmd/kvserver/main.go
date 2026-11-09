@@ -20,6 +20,7 @@ import (
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/api"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/config"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/database"
+	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/observability"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/raft"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/snapshot"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/transport"
@@ -53,6 +54,7 @@ func run(ctx context.Context, args []string, output io.Writer) (runErr error) {
 }
 
 func runStandalone(ctx context.Context, cfg config.Server, output io.Writer) (runErr error) {
+	logger := newLogger(output)
 	if err := os.MkdirAll(cfg.DataDirectory, 0o700); err != nil {
 		return fmt.Errorf("create data directory %q: %w", cfg.DataDirectory, err)
 	}
@@ -63,12 +65,13 @@ func runStandalone(ctx context.Context, cfg config.Server, output io.Writer) (ru
 	defer func() {
 		runErr = errors.Join(runErr, store.Close())
 	}()
-	newLogger(output).Info("database recovered", "records", recovery.Records, "truncated_bytes", recovery.TruncatedBytes)
+	logger.Info("database recovered", "records", recovery.Records, "truncated_bytes", recovery.TruncatedBytes)
 
 	handler, err := api.NewHandler(store, cfg.MaxValueBytes)
 	if err != nil {
 		return fmt.Errorf("create API handler: %w", err)
 	}
+	handler.EnableObservability(observability.NewRecorder(), nil)
 
 	listener, err := net.Listen("tcp", cfg.Address)
 	if err != nil {
@@ -79,7 +82,7 @@ func runStandalone(ctx context.Context, cfg config.Server, output io.Writer) (ru
 		Handler:           handler.Routes(),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
-	return serve(ctx, server, listener, cfg.ShutdownTimeout, newLogger(output))
+	return serve(ctx, server, listener, cfg.ShutdownTimeout, logger)
 }
 
 func runCluster(ctx context.Context, cfg config.Server, output io.Writer) (runErr error) {
@@ -118,6 +121,10 @@ func runCluster(ctx context.Context, cfg config.Server, output io.Writer) (runEr
 		RecoveryObserver: func(event raft.RecoveryEvent) {
 			logger.Info("Raft recovery phase", "phase", event.Phase, "elapsed", event.Elapsed, "index", event.Index)
 		},
+		Observer: func(event raft.Event) {
+			logger.Info("Raft event", "event", event.Kind, "node_id", event.Node, "peer_id", event.Peer,
+				"role", event.Role.String(), "term", event.Term, "leader_id", event.LeaderID, "index", event.Index)
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("create Raft node: %w", err)
@@ -132,6 +139,7 @@ func runCluster(ctx context.Context, cfg config.Server, output io.Writer) (runEr
 	if err != nil {
 		return fmt.Errorf("create API handler: %w", err)
 	}
+	clientHandler.EnableObservability(observability.NewRecorder(), node)
 	peerHandler, err := transport.NewHTTPHandler(node, transport.DefaultMaxRPCBytes)
 	if err != nil {
 		return fmt.Errorf("create peer handler: %w", err)

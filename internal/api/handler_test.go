@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/api"
+	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/observability"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/storage"
 )
 
@@ -50,6 +51,26 @@ func TestHealth(t *testing.T) {
 	}
 	if got := body["status"]; got != "ok" {
 		t.Fatalf("health status body = %q, want ok", got)
+	}
+}
+
+func TestMetricsReportsRequests(t *testing.T) {
+	handler, err := api.NewHandler(storage.NewMemoryStore(), api.DefaultMaxValueBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.EnableObservability(observability.NewRecorder(), nil)
+	server := httptest.NewServer(handler.Routes())
+	defer server.Close()
+	assertRequest(t, server, http.MethodPut, "/v1/keys/key", "value", http.StatusNoContent, "")
+	response := request(t, server, http.MethodGet, "/metrics", "")
+	defer response.Body.Close()
+	var report observability.Report
+	if err := json.NewDecoder(response.Body).Decode(&report); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || len(report.Requests) != 1 || report.Requests[0].Operation != "put" || report.Requests[0].StatusCounts[204] != 1 {
+		t.Fatalf("metrics response status=%d report=%+v", response.StatusCode, report)
 	}
 }
 

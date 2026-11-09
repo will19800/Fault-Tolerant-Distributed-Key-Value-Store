@@ -36,3 +36,24 @@ resumes commits within 300ms. Those experiments must remain separate.
 `recovery-local.json` records one run on the development machine. Re-run the
 command on the hardware used for final claims and retain results even when the
 target is missed.
+
+## Cluster throughput and failover
+
+Run the opt-in three-node measurement with:
+
+```sh
+make cluster-bench
+```
+
+The harness launches three real HTTP servers with separate durable directories.
+It sends 200 unique 128-byte PUTs at concurrency four to the known leader, then
+launches five fresh clusters and measures graceful leader stop to the first
+successful committed PUT on a replacement leader. The report records throughput,
+request p50/p95/p99/max, failover p50/p95/p99/max, environment, durability, and
+limitations in `cluster-local.json`.
+
+The retained November 9, 2026 Apple M2 run observed 94.1 PUT/s, 41.5ms p50 and
+55.1ms p99 request latency. Five failovers observed 199.7ms p50 and 449.6ms
+maximum interruption. Five samples are descriptive rather than statistically
+strong. This single-host workload excludes real network latency, independent
+disks, abrupt process death, leader discovery cost, reads, and mixed traffic.

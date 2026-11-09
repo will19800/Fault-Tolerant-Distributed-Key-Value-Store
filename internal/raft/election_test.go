@@ -261,6 +261,7 @@ type electionNodeOptions struct {
 	transport    raft.PeerTransport
 	lastLogIndex raft.LogIndex
 	lastLogTerm  raft.Term
+	observer     raft.Observer
 }
 
 func newElectionTestNode(t *testing.T, options electionNodeOptions) (*raft.Node, *recordingTimer, *timerClock) {
@@ -280,6 +281,7 @@ func newElectionTestNode(t *testing.T, options electionNodeOptions) (*raft.Node,
 		Persistence:  newMemoryHardStateStore(raft.HardState{}),
 		LogStore:     newMemoryLogStore(entries),
 		StateMachine: newMemoryStateMachine(),
+		Observer:     options.observer,
 	})
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)

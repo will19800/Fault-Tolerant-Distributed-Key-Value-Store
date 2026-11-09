@@ -1,0 +1,37 @@
+{
+  "measured_at": "2026-11-09T13:45:40Z",
+  "environment": {
+    "os": "darwin",
+    "architecture": "arm64",
+    "go_version": "go1.26.4",
+    "cpus": 8
+  },
+  "workload": {
+    "nodes": 3,
+    "operations": 200,
+    "concurrency": 4,
+    "value_bytes": 128,
+    "failover_trials": 5,
+    "durability": "checksummed Raft files; fsync and atomic rename before acknowledgement"
+  },
+  "throughput": {
+    "operations_per_second": 94.11426634150935,
+    "p50_ms": 41.514958,
+    "p95_ms": 51.093875,
+    "p99_ms": 55.116083,
+    "max_ms": 56.283
+  },
+  "failover": {
+    "metric": "graceful leader stop to first successful committed HTTP PUT on a replacement leader",
+    "samples": 5,
+    "p50_ms": 199.708708,
+    "p95_ms": 211.094708,
+    "p99_ms": 211.094708,
+    "max_ms": 449.570167
+  },
+  "limitations": [
+    "All nodes and clients run on one machine, so results do not include real network latency or independent disks.",
+    "Failover uses graceful process cancellation, not SIGKILL or power loss.",
+    "The throughput workload sends PUTs to the known leader and does not measure leader discovery or mixed reads."
+  ]
+}

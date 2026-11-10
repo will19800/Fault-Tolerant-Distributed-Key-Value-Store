@@ -25,6 +25,7 @@ import (
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/snapshot"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/transport"
 	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/wal"
+	"github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store/internal/webui"
 )
 
 const readHeaderTimeout = 5 * time.Second
@@ -79,7 +80,7 @@ func runStandalone(ctx context.Context, cfg config.Server, output io.Writer) (ru
 	}
 
 	server := &http.Server{
-		Handler:           handler.Routes(),
+		Handler:           webui.New(handler.Routes()),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 	return serve(ctx, server, listener, cfg.ShutdownTimeout, logger)
@@ -153,7 +154,7 @@ func runCluster(ctx context.Context, cfg config.Server, output io.Writer) (runEr
 		_ = clientListener.Close()
 		return fmt.Errorf("listen on peer address %s: %w", cfg.PeerAddress, err)
 	}
-	clientServer := &http.Server{Handler: clientHandler.Routes(), ReadHeaderTimeout: readHeaderTimeout}
+	clientServer := &http.Server{Handler: webui.New(clientHandler.Routes()), ReadHeaderTimeout: readHeaderTimeout}
 	peerServer := &http.Server{Handler: peerHandler.Routes(), ReadHeaderTimeout: readHeaderTimeout}
 	logger.Info("cluster node starting", "node_id", cfg.NodeID, "client_address", cfg.Address, "peer_address", cfg.PeerAddress)
 	serveCtx, cancelServe := context.WithCancel(ctx)

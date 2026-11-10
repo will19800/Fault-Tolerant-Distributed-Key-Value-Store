@@ -26,6 +26,7 @@ internal/
   storage/           Deterministic key-value state machine
   transport/         Node-to-node Raft communication
   wal/               Durable metadata and Raft log
+  webui/             Embedded recruiter console and live visualizations
 configs/             Example configurations
 test/integration/    Multi-package and multi-node tests
 test/failure/        Reproducible adversarial scenarios
@@ -54,6 +55,12 @@ Start the server with its default address, `127.0.0.1:8080`:
 ```sh
 go run ./cmd/kvserver
 ```
+
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080) for the recruiter console.
+It runs real PUT, GET, and DELETE requests against the server, displays live
+request and Raft telemetry, and explains the architecture and measured project
+evidence. The console is embedded in the server binary, so it needs no separate
+frontend build or API configuration.
 
 Acknowledged mutations are flushed to `data/store.wal` before success is
 returned. Restarting the server with the same `-data-dir` restores its state.

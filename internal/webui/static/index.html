@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Interactive console for a Go and Raft fault-tolerant key-value store.">
+  <title>Fault-Tolerant KV — Live Project Console</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#lab">Skip to live console</a>
+  <header class="topbar">
+    <a class="brand" href="#top" aria-label="Fault-Tolerant KV home">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>FTKV <small>/ RAFT LAB</small></span>
+    </a>
+    <nav aria-label="Primary navigation">
+      <a href="#lab">Live test</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#evidence">Evidence</a>
+    </nav>
+    <div class="connection" id="connectionBadge"><span></span>Connecting</div>
+  </header>
+
+  <main id="top">
+    <section class="hero section-shell">
+      <div class="hero-copy reveal">
+        <p class="eyebrow">A distributed systems project you can interrogate</p>
+        <h1>Break the mystery.<br><em>Inspect the guarantees.</em></h1>
+        <p class="hero-lede">A key-value database built from first principles in Go: durable writes, Raft consensus, linearizable reads, snapshots, recovery, and reproducible fault controls.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="#lab">Run a live operation <span>↘</span></a>
+          <a class="button quiet" href="#evidence">Review the evidence</a>
+        </div>
+        <dl class="hero-facts" aria-label="Project facts">
+          <div><dt>25</dt><dd>milestones shipped</dd></div>
+          <div><dt>52</dt><dd>fault cases declared</dd></div>
+          <div><dt>3 / 5</dt><dd>node clusters</dd></div>
+        </dl>
+      </div>
+
+      <div class="cluster-stage reveal" aria-label="Live Raft cluster illustration">
+        <div class="stage-grid"></div>
+        <div class="stage-label"><span>LIVE TOPOLOGY</span><b id="stageMode">discovering…</b></div>
+        <svg class="links" viewBox="0 0 600 510" aria-hidden="true">
+          <path id="link12" d="M300 104 L150 350"></path>
+          <path id="link13" d="M300 104 L450 350"></path>
+          <path id="link23" d="M150 350 L450 350"></path>
+        </svg>
+        <div class="node node-one" data-node="1"><span class="node-halo"></span><b>N1</b><small id="nodeOneRole">LOCAL</small></div>
+        <div class="node node-two muted" data-node="2"><span class="node-halo"></span><b>N2</b><small>PEER</small></div>
+        <div class="node node-three muted" data-node="3"><span class="node-halo"></span><b>N3</b><small>PEER</small></div>
+        <div class="packet packet-a"></div><div class="packet packet-b"></div>
+        <div class="stage-readout">
+          <span>TERM <b id="heroTerm">—</b></span>
+          <span>COMMIT <b id="heroCommit">—</b></span>
+          <span>APPLIED <b id="heroApplied">—</b></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="marquee" aria-label="System capabilities">
+      <div><span>QUORUM COMMIT</span><i>◆</i><span>LINEARIZABLE READS</span><i>◆</i><span>ATOMIC SNAPSHOTS</span><i>◆</i><span>SEEDED FAILURE INJECTION</span><i>◆</i><span>CHECKSUMMED DURABILITY</span><i>◆</i></div>
+    </section>
+
+    <section class="lab section-shell" id="lab">
+      <div class="section-heading reveal">
+        <p class="eyebrow">01 / Recruiter test drive</p>
+        <h2>Use the real database.<br><em>No simulated responses.</em></h2>
+        <p>Every action below calls the same HTTP endpoints used by <code>kvctl</code>. Watch the response, latency, commit index, and request metrics change.</p>
+      </div>
+
+      <div class="lab-grid reveal">
+        <div class="terminal-panel">
+          <div class="panel-bar"><span><i></i><i></i><i></i></span><b>OPERATION LAB</b><small id="endpointLabel">same origin</small></div>
+          <form id="operationForm">
+            <label>Key <input id="keyInput" name="key" value="recruiter/demo" maxlength="1024" required spellcheck="false"></label>
+            <label>Value <textarea id="valueInput" name="value" rows="5" spellcheck="false">{"candidate":"Will Chen","signal":"systems thinking"}</textarea></label>
+            <div class="operation-buttons">
+              <button class="op active" type="submit" data-operation="put"><span>PUT</span><small>create / replace</small></button>
+              <button class="op" type="button" data-operation="get"><span>GET</span><small>linearizable read</small></button>
+              <button class="op danger" type="button" data-operation="delete"><span>DELETE</span><small>remove key</small></button>
+            </div>
+          </form>
+          <div class="response-box" aria-live="polite">
+            <div><span>RESPONSE</span><b id="responseStatus">READY</b><time id="responseTime">— ms</time></div>
+            <pre id="responseBody">Choose an operation to begin.</pre>
+          </div>
+        </div>
+
+        <aside class="telemetry-panel">
+          <div class="panel-title"><span>NODE TELEMETRY</span><button id="refreshButton" type="button">↻ refresh</button></div>
+          <div class="role-card"><span id="roleDot"></span><div><small>CURRENT ROLE</small><strong id="metricRole">CONNECTING</strong></div><b id="metricNode">—</b></div>
+          <div class="metric-grid">
+            <div><small>TERM</small><strong id="metricTerm">—</strong></div>
+            <div><small>LEADER</small><strong id="metricLeader">—</strong></div>
+            <div><small>COMMIT</small><strong id="metricCommit">—</strong></div>
+            <div><small>APPLY LAG</small><strong id="metricLag">—</strong></div>
+          </div>
+          <div class="activity-chart">
+            <div><span>REQUEST ACTIVITY</span><small id="requestTotal">0 requests</small></div>
+            <svg id="activityChart" viewBox="0 0 360 90" preserveAspectRatio="none" aria-label="Recent request activity chart"><path class="chart-fill" d=""></path><polyline points=""></polyline></svg>
+          </div>
+          <div class="guide-steps">
+            <div class="done"><b>1</b><span><strong>Write a value</strong><small>Observe durable quorum acknowledgement</small></span></div>
+            <div><b>2</b><span><strong>Read it back</strong><small>Exercise the read barrier</small></span></div>
+            <div><b>3</b><span><strong>Delete and verify</strong><small>Confirm deterministic state change</small></span></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="architecture section-shell" id="architecture">
+      <div class="section-heading split reveal">
+        <div><p class="eyebrow">02 / Under the hood</p><h2>One write.<br><em>Five boundaries.</em></h2></div>
+        <p>The system favors explicit seams over hidden framework behavior. Follow a successful PUT from HTTP request to durable, replicated state.</p>
+      </div>
+      <ol class="flow-grid reveal">
+        <li><span>01</span><i class="flow-icon">HTTP</i><h3>Validate</h3><p>The API bounds keys and values, preserves cancellation, and encodes clear failure semantics.</p></li>
+        <li><span>02</span><i class="flow-icon">LOG</i><h3>Propose</h3><p>The leader appends a checksummed command and persists it before replication.</p></li>
+        <li><span>03</span><i class="flow-icon">3/5</i><h3>Replicate</h3><p>AppendEntries moves the command to a majority. Minority copies cannot commit alone.</p></li>
+        <li><span>04</span><i class="flow-icon">✓</i><h3>Apply</h3><p>Committed commands execute once, in index order, on the deterministic state machine.</p></li>
+        <li><span>05</span><i class="flow-icon">204</i><h3>Acknowledge</h3><p>Success returns only after local application; a timeout is honestly marked ambiguous.</p></li>
+      </ol>
+    </section>
+
+    <section class="evidence section-shell" id="evidence">
+      <div class="section-heading split reveal">
+        <div><p class="eyebrow">03 / Evidence, not adjectives</p><h2>Measured locally.<br><em>Qualified precisely.</em></h2></div>
+        <p>These numbers come from committed benchmark artifacts on an Apple M2. They describe a single-host learning environment, not production infrastructure.</p>
+      </div>
+      <div class="evidence-grid reveal">
+        <article class="number-card accent"><small>DURABLE PUT THROUGHPUT</small><strong>94.1</strong><span>operations / second</span><p>3 nodes · 200 writes · concurrency 4 · 128-byte values</p></article>
+        <article class="number-card"><small>REQUEST LATENCY</small><strong>55.1<sup>ms</sup></strong><span>p99</span><p>Known-leader PUT path with fsync and atomic file replacement</p></article>
+        <article class="number-card"><small>LEADER FAILOVER</small><strong>199.7<sup>ms</sup></strong><span>p50</span><p>5 graceful-stop trials · maximum observed 449.6 ms</p></article>
+        <article class="number-card"><small>FOLLOWER RECOVERY</small><strong>1.86<sup>ms</sup></strong><span>p99</span><p>50 in-process trials through a fixed reference index</p></article>
+      </div>
+      <div class="truth-strip reveal">
+        <b>Scope matters.</b>
+        <p>The 52-scenario catalog is defined and validated, but it is not yet an end-to-end executed suite. The full-cluster 300 ms recovery claim is also unearned. The project’s evidence report says this plainly.</p>
+        <a href="https://github.com/will19800/Fault-Tolerant-Distributed-Key-Value-Store" target="_blank" rel="noreferrer">Inspect the source ↗</a>
+      </div>
+    </section>
+
+    <section class="faults section-shell">
+      <div class="section-heading reveal"><p class="eyebrow">04 / Failure model</p><h2>Designed to be disrupted.</h2></div>
+      <div class="fault-grid reveal">
+        <article><div class="fault-viz partition-viz"><i></i><i></i><span></span></div><small>NETWORK</small><h3>Partitions & asymmetry</h3><p>Cut groups in both directions or drop one message path while reverse traffic survives.</p></article>
+        <article><div class="fault-viz loss-viz"><i></i><i></i><i></i><i></i><i></i></div><small>TRANSPORT</small><h3>Loss, delay & jitter</h3><p>Target votes, append traffic, or snapshots with reproducible seeded randomness.</p></article>
+        <article><div class="fault-viz crash-viz"><span>01</span><b>×</b><span>10</span></div><small>PROCESS</small><h3>Crash & restart</h3><p>Separate abrupt termination from graceful stop, then verify durable recovery paths.</p></article>
+        <article><div class="fault-viz oracle-viz"><span>ISSUED</span><span>ACK</span><span>TIMEOUT</span></div><small>INDEPENDENT CHECK</small><h3>Correctness oracle</h3><p>Track ambiguous outcomes, compare committed prefixes, and test eventual convergence.</p></article>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="brand"><span class="brand-mark"><i></i><i></i><i></i></span><span>FTKV</span></div>
+    <p>Built in Go to understand the machinery—not hide it.</p>
+    <a href="#top">Back to top ↑</a>
+  </footer>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
